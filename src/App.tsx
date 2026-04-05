@@ -656,6 +656,7 @@ function App() {
         timestamp: Timestamp.now(),
         completedAt: Timestamp.now(),
         details: [...results, {
+          questionId: questions[currentIndex]?.id ?? currentIndex,
           isCorrect: JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence),
           userAnswer: placedWords.map(w => w || ""),
           correctAnswer: questions[currentIndex].correctSentence
