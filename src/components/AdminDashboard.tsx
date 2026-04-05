@@ -200,26 +200,48 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     const avgScore = results.reduce((acc, r) => acc + (r.score / r.totalQuestions), 0) / totalAttempts * 100;
     const uniqueUsers = new Set(results.map(r => r.userId)).size;
 
-    const questionStats: Record<number, { correct: number, total: number }> = {};
+    // 构建 setId+questionIndex -> 题目内容 的映射
+    const questionContentMap: Record<string, string> = {};
+    sets.forEach(set => {
+      const qs: any[] = set.questions || [];
+      qs.forEach((q: any, idx: number) => {
+        const key = `${set.id}::${q.id ?? idx}`;
+        // 优先取 speaker1 对话内容，其次取 template，最后用编号
+        const content = q.conversation?.speaker1?.text || q.template || q.text || `题目 ${idx + 1}`;
+        questionContentMap[key] = content;
+      });
+    });
+
+    // key: "setId::questionId"
+    const questionStats: Record<string, { correct: number, total: number, setId: string, setName: string, qId: any }> = {};
     results.forEach(r => {
       r.details.forEach(d => {
-        if (!questionStats[d.questionId]) questionStats[d.questionId] = { correct: 0, total: 0 };
-        questionStats[d.questionId].total++;
-        if (d.isCorrect) questionStats[d.questionId].correct++;
+        const key = `${r.setId}::${d.questionId}`;
+        if (!questionStats[key]) questionStats[key] = { correct: 0, total: 0, setId: r.setId, setName: r.setName, qId: d.questionId };
+        questionStats[key].total++;
+        if (d.isCorrect) questionStats[key].correct++;
       });
     });
 
     const questionErrorRank = Object.entries(questionStats)
-      .map(([id, s]) => ({
-        id,
-        errorRate: Math.round(((s.total - s.correct) / s.total) * 100),
-        total: s.total,
-        correct: s.correct
-      }))
+      .map(([key, s]) => {
+        const content = questionContentMap[key];
+        const label = content
+          ? (content.length > 40 ? content.slice(0, 40) + '…' : content)
+          : (s.qId !== undefined && s.qId !== null ? `${s.setName} · 题目 ${s.qId}` : `${s.setName} · 题目`);
+        return {
+          id: key,
+          label,
+          setName: s.setName,
+          errorRate: Math.round(((s.total - s.correct) / s.total) * 100),
+          total: s.total,
+          correct: s.correct
+        };
+      })
       .sort((a, b) => b.errorRate - a.errorRate);
 
     return { totalAttempts, avgScore: Math.round(avgScore), uniqueUsers, questionErrorRank };
-  }, [results]);
+  }, [results, sets]);
 
   // 学生大数据汇总
   const studentStats = useMemo(() => {
@@ -432,7 +454,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   return (
     <div className="min-h-screen bg-gray-50 p-4 md:p-8">
       <div className="max-w-7xl mx-auto">
-        <header className="mb-8 flex justify-between items-center">
+        <header className="mb-8 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
           <div className="flex items-center gap-4">
             <button 
               onClick={onBack}
@@ -442,17 +464,17 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
               <ArrowLeft size={24} />
             </button>
             <div>
-              <h1 className="text-3xl font-black text-gray-900">Eva 管理后台</h1>
-              <p className="text-gray-500 font-medium">写作团数据监控与激活码管理</p>
+              <h1 className="text-xl sm:text-2xl lg:text-3xl font-black text-gray-900">Eva 管理后台</h1>
+              <p className="text-gray-500 font-medium text-xs sm:text-sm hidden sm:block">写作团数据监控与激活码管理</p>
             </div>
           </div>
-          <div className="flex bg-white p-1 rounded-2xl shadow-sm border border-gray-200">
+          <div className="flex bg-white p-1 rounded-2xl shadow-sm border border-gray-200 overflow-x-auto -mx-1 px-1">
             {['overview', 'sets', 'students', 'codes'].map((tab) => (
               <button 
                 key={tab}
                 onClick={() => setActiveTab(tab as any)}
                 className={cn(
-                  "px-6 py-2 rounded-xl font-bold text-sm transition-all",
+                  "px-3 sm:px-4 py-2 rounded-xl font-bold text-xs sm:text-sm transition-all whitespace-nowrap flex-shrink-0",
                   activeTab === tab ? "bg-teal-600 text-white shadow-lg" : "text-gray-500 hover:bg-gray-50"
                 )}
               >
@@ -488,9 +510,17 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
               </h3>
               <div className="space-y-4">
                 {stats?.questionErrorRank.slice(0, 10).map((q, idx) => (
-                  <div key={q.id} className="flex items-center justify-between p-4 bg-gray-50 rounded-2xl">
-                    <span className="font-bold text-gray-700">题目 {q.id}</span>
-                    <span className="text-rose-600 font-black">{q.errorRate}% 错误率</span>
+                  <div key={q.id} className="flex items-start justify-between p-4 bg-gray-50 rounded-2xl gap-4">
+                    <div className="flex items-start gap-3 min-w-0">
+                      <span className="w-6 h-6 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-xs font-black mt-0.5">
+                        {idx + 1}
+                      </span>
+                      <div className="min-w-0">
+                        <p className="font-bold text-gray-700 text-sm leading-snug">{q.label}</p>
+                        <p className="text-xs text-gray-400 mt-0.5">{q.setName} · {q.total} 次作答</p>
+                      </div>
+                    </div>
+                    <span className="text-rose-600 font-black flex-shrink-0">{q.errorRate}% 错误率</span>
                   </div>
                 ))}
               </div>

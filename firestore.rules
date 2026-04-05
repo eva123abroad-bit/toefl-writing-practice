@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============ 用户数据 ============
+    // 用户只能读写自己的账号信息
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null && request.auth.uid == userId;
+      allow update: if request.auth != null && request.auth.uid == userId;
+      allow delete: if false; // 不允许删除用户
+    }
+
+    // ============ 题库（Questions）============
+    // 所有登录用户可以读取题库（学生做题需要）
+    // 只有 admin 才能修改题库
+    match /questions/{setId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null
+        && request.auth.token.role == 'admin';
+    }
+
+    // ============ 答题记录（Results）============
+    // 学生只能创建和读取自己的答题记录
+    // 不能修改或删除（防止作弊）
+    match /results/{resultId} {
+      allow read: if request.auth != null
+        && (request.auth.uid == resource.data.userId
+            || request.auth.token.role == 'admin');
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.userId;
+      allow update, delete: if false;
+    }
+
+    // ============ 激活码（Activation Codes）============
+    // 所有登录用户可以读取激活码（验证用）
+    // 只有 admin 可以创建/修改/删除激活码
+    match /activationCodes/{codeId} {
+      allow read: if request.auth != null;
+      allow create, update: if request.auth != null
+        && request.auth.token.role == 'admin';
+      allow delete: if false;
+    }
+
+    // ============ 写作练习记录（Practice Records）============
+    // 学生只能创建和读取自己的练习记录
+    match /practiceRecords/{recordId} {
+      allow read: if request.auth != null
+        && (request.auth.uid == resource.data.userId
+            || request.auth.token.role == 'admin');
+      allow create: if request.auth != null
+        && request.auth.uid == request.resource.data.userId;
+      allow update, delete: if false;
+    }
+
+    // ============ 微信收集（Leads）============
+    // 只有 admin 可以查看和删除，其他人不能访问
+    match /leads/{leadId} {
+      allow read, delete: if request.auth != null
+        && request.auth.token.role == 'admin';
+      allow create: if request.auth != null;
+      allow update: if false;
+    }
+
+    // ============ 默认拒绝 ============
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
