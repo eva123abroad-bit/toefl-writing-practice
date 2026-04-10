@@ -77,6 +77,11 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   const [studentFilter, setStudentFilter] = useState<'all' | 'pro' | 'free'>('all');
   const [selectedQuestion, setSelectedQuestion] = useState<{set: any, question: any, idx: number} | null>(null);
   
+  // 日期选择弹窗状态
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>('');
+  
   // New Set Form State
   const [editingSetId, setEditingSetId] = useState<string | null>(null);
   const [newSetName, setNewSetName] = useState('');
@@ -436,20 +441,34 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const extendSubscription = async (studentId: string, currentExpiresAt: string) => {
+  const extendSubscription = (studentId: string, currentExpiresAt: string) => {
+    // 设置默认日期为当前到期日期加1天，或者默认1个月后
+    const defaultDate = new Date();
+    defaultDate.setMonth(defaultDate.getMonth() + 1);
+    setSelectedDate(defaultDate.toISOString().split('T')[0]);
+    setEditingStudentId(studentId);
+    setShowDatePicker(true);
+  };
+  
+  const handleSaveCustomDate = async () => {
+    if (!editingStudentId || !selectedDate) return;
+    
     try {
-      const current = currentExpiresAt ? new Date(currentExpiresAt) : new Date();
-      current.setDate(current.getDate() + 7);
-      const newExpiresAt = current.toISOString();
+      // 将日期设置为当天 23:59:59
+      const selectedDateTime = new Date(selectedDate);
+      selectedDateTime.setHours(23, 59, 59, 999);
+      const newExpiresAt = selectedDateTime.toISOString();
       
-      await updateDoc(doc(db, 'users', studentId), {
+      await updateDoc(doc(db, 'users', editingStudentId), {
         expiresAt: newExpiresAt
       });
       
-      setStudents(prev => prev.map(s => s.id === studentId ? { ...s, expiresAt: newExpiresAt } : s));
-      alert("Subscription extended by 7 days!");
+      setStudents(prev => prev.map(s => s.id === editingStudentId ? { ...s, expiresAt: newExpiresAt } : s));
+      setShowDatePicker(false);
+      setEditingStudentId(null);
+      alert("到期时间已更新！");
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${studentId}`);
+      handleFirestoreError(error, OperationType.UPDATE, `users/${editingStudentId}`);
     }
   };
 
@@ -1072,6 +1091,58 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 日期选择器弹窗 */}
+      {showDatePicker && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setShowDatePicker(false)}></div>
+          <div className="relative bg-white rounded-[2rem] p-8 shadow-2xl max-w-md w-full">
+            <button 
+              onClick={() => setShowDatePicker(false)}
+              className="absolute top-4 right-4 p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-all"
+            >
+              <X size={20} />
+            </button>
+            
+            <div className="text-center mb-8">
+              <div className="w-16 h-16 bg-teal-50 text-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <Calendar size={32} />
+              </div>
+              <h3 className="text-2xl font-black text-gray-900 mb-2">设置到期时间</h3>
+              <p className="text-gray-500">选择学生账号到期的日期（自动设置为当天 23:59:59）</p>
+            </div>
+            
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">到期日期</label>
+                <input 
+                  type="date" 
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="w-full px-6 py-4 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-teal-500 focus:bg-white outline-none text-lg font-medium"
+                  min={new Date().toISOString().split('T')[0]}
+                />
+                <p className="text-xs text-gray-400 mt-2">到期时间将自动设置为所选日期的 23:59:59</p>
+              </div>
+              
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setShowDatePicker(false)}
+                  className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold hover:bg-gray-200 transition-all"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleSaveCustomDate}
+                  className="flex-1 py-4 bg-teal-600 text-white rounded-2xl font-bold hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20"
+                >
+                  确认保存
+                </button>
+              </div>
             </div>
           </div>
         </div>
