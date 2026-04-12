@@ -996,25 +996,28 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
               </button>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {activationCodes.map(c => (
-                <div key={c.id} className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex justify-between items-center">
-                  <div className="flex flex-col">
-                    <code className="font-mono font-black text-teal-700">{c.code}</code>
-                    {c.usedBy && <span className="text-[10px] text-gray-400">Used by: {c.usedBy.slice(0, 8)}...</span>}
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={cn("text-[10px] font-bold px-2 py-1 rounded-lg uppercase", c.status === 'unused' ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-500")}>
-                      {c.status === 'unused' ? '未使用' : '已使用'}
-                    </span>
-                    <button 
-                      onClick={() => deleteCode(c.id)}
-                      className="p-1 text-gray-300 hover:text-rose-500 transition-colors"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
+{activationCodes.map(c => {
+  const isUsed = c.used === true || c.status === 'used';
+  return (
+    <div key={c.id} className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex justify-between items-center">
+      <div className="flex flex-col">
+        <code className="font-mono font-black text-teal-700">{c.code}</code>
+        {c.usedBy && c.usedBy !== 'pending' && (
+          <span className="text-[10px] text-gray-400">Used by: {String(c.usedBy).slice(0, 8)}...</span>
+        )}
+      </div>
+      <div className="flex items-center gap-2">
+        <span className={cn("text-[10px] font-bold px-2 py-1 rounded-lg uppercase", isUsed ? "bg-gray-200 text-gray-500" : "bg-green-100 text-green-700")}>
+          {isUsed ? '已使用' : '未使用'}
+        </span>
+        <button onClick={() => deleteCode(c.id)} className="p-1 text-gray-300 hover:text-rose-500 transition-colors">
+          <Trash2 size={14} />
+        </button>
+      </div>
+    </div>
+  );
+})}
+
             </div>
           </div>
         )}
