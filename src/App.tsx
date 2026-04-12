@@ -258,6 +258,8 @@ function App() {
   const [timerActive, setTimerActive] = useState(false);
   const [timeTaken, setTimeTaken] = useState<number>(0);
   const [results, setResults] = useState<{ isCorrect: boolean, userAnswer: string[], correctAnswer: string[] }[]>([]);
+  // 存储每道题的用户答案（用于返回上一题）
+  const [answerHistory, setAnswerHistory] = useState<(string | null)[][]>([]);
 
   // Timer Effect
   useEffect(() => {
@@ -470,6 +472,8 @@ function App() {
       alert(role === 'student' ? '注册成功！欢迎加入写作团。' : '注册成功！已开启免费练习模式。');
       setFilterType(intendedMode === 'pro' ? 'pro' : 'free');
       setView('home');
+      // 强制刷新确保 Firebase Auth 状态完全同步
+      window.location.reload();
     } catch (error: any) {
       console.error('Registration error:', error);
       alert('注册失败原因：' + error.message);
@@ -605,10 +609,12 @@ function App() {
     const duration = 360 - timeLeft;
     setTimeTaken(duration);
     
+    // 先保存结果（游客不填写也保存匿名记录）
+    saveResult(duration);
+    
+    // 如果是游客，弹出弹窗让用户可选填写微信
     if (!user) {
       setShowGuestModal(true);
-    } else {
-      saveResult(duration);
     }
   };
 
@@ -627,6 +633,9 @@ function App() {
       userAnswer: placedWords.map(w => w || ""), 
       correctAnswer: currentQ.correctSentence || []
     }]);
+    
+    // 保存当前答案到历史记录
+    setAnswerHistory(prev => [...prev, [...placedWords]]);
 
     if (currentIndex < questions.length - 1) {
       const nextIdx = currentIndex + 1;
@@ -635,6 +644,28 @@ function App() {
     } else {
       finishQuiz();
     }
+  };
+  
+  const prevQuestion = () => {
+    if (currentIndex === 0) return;
+    
+    // 恢复上一题的答案
+    const newHistory = [...answerHistory];
+    const prevAnswers = newHistory.pop();
+    setAnswerHistory(newHistory);
+    
+    // 恢复分数（如果之前那题是对的，减回去）
+    const prevResults = [...results];
+    const lastResult = prevResults.pop();
+    setResults(prevResults);
+    if (lastResult?.isCorrect) {
+      setScore(s => s - 1);
+    }
+    
+    // 回到上一题
+    const prevIdx = currentIndex - 1;
+    setCurrentIndex(prevIdx);
+    setPlacedWords(prevAnswers || new Array(questions[prevIdx].correctSentence.length).fill(null));
   };
 
   const saveResult = async (duration: number) => {
@@ -656,6 +687,7 @@ function App() {
         timestamp: Timestamp.now(),
         completedAt: Timestamp.now(),
         details: [...results, {
+          questionId: questions[currentIndex]?.id ?? currentIndex,
           isCorrect: JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence),
           userAnswer: placedWords.map(w => w || ""),
           correctAnswer: questions[currentIndex].correctSentence
@@ -935,6 +967,18 @@ function App() {
                         </div>
                       </div>
                       <div className="flex items-center gap-4">
+                        <button 
+                          onClick={prevQuestion} 
+                          disabled={currentIndex === 0}
+                          className={cn(
+                            "px-4 py-2 rounded-xl font-bold transition-all flex items-center gap-2",
+                            currentIndex === 0 
+                              ? "bg-gray-100 text-gray-400 cursor-not-allowed" 
+                              : "bg-gray-200 text-gray-700 hover:bg-gray-300"
+                          )}
+                        >
+                          <ArrowLeft size={18} /> Prev
+                        </button>
                         <div className="bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 flex items-center gap-2">
                           <Timer size={18} className="text-teal-600" />
                           <span className={cn("font-mono font-bold", timeLeft < 30 ? "text-red-600 animate-pulse" : "text-gray-700")}>{formatTime(timeLeft)}</span>

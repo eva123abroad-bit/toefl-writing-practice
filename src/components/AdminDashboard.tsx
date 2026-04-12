@@ -27,7 +27,8 @@ import {
   LayoutDashboard,
   Key,
   Copy,
-  RefreshCw
+  RefreshCw,
+  X
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from './lib/utils';
@@ -48,9 +49,10 @@ interface QuizResult {
   timeSpent: number;
   completedAt: string;
   details: {
-    questionId: number;
+    questionId?: number;
     isCorrect: boolean;
-    userAnswer: string;
+    userAnswer: string | string[];
+    correctAnswer: string | string[];
   }[];
 }
 
@@ -73,6 +75,12 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'sets' | 'students' | 'codes'>('overview');
   const [studentFilter, setStudentFilter] = useState<'all' | 'pro' | 'free'>('all');
+  const [selectedQuestion, setSelectedQuestion] = useState<{set: any, question: any, idx: number} | null>(null);
+  
+  // 日期选择弹窗状态
+  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [editingStudentId, setEditingStudentId] = useState<string | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string>('');
   
   // New Set Form State
   const [editingSetId, setEditingSetId] = useState<string | null>(null);
@@ -193,6 +201,16 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     fetchData();
   }, []);
 
+  // 点击错题查看原题
+  const handleViewQuestion = (key: string) => {
+    const [setId, idxStr] = key.split('::');
+    const idx = parseInt(idxStr);
+    const set = sets.find(s => s.id === setId);
+    if (set && set.questions && set.questions[idx]) {
+      setSelectedQuestion({ set, question: set.questions[idx], idx });
+    }
+  };
+
   // 核心逻辑：错题排行 & 数据看板
   const stats = useMemo(() => {
     if (results.length === 0) return null;
@@ -200,24 +218,28 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     const avgScore = results.reduce((acc, r) => acc + (r.score / r.totalQuestions), 0) / totalAttempts * 100;
     const uniqueUsers = new Set(results.map(r => r.userId)).size;
 
-    // 构建 setId+questionIndex -> 题目内容 的映射
-    const questionContentMap: Record<string, string> = {};
+    // 构建 setId -> [题目内容列表] 的映射，方便按索引查找
+    const setQuestionsMap: Record<string, string[]> = {};
     sets.forEach(set => {
       const qs: any[] = set.questions || [];
-      qs.forEach((q: any, idx: number) => {
-        const key = `${set.id}::${q.id ?? idx}`;
-        // 优先取 speaker1 对话内容，其次取 template，最后用编号
-        const content = q.conversation?.speaker1?.text || q.template || q.text || `题目 ${idx + 1}`;
-        questionContentMap[key] = content;
+      setQuestionsMap[set.id] = qs.map((q: any, idx: number) => {
+        return q.conversation?.speaker1?.text || q.template || q.text || `题目 ${idx + 1}`;
       });
     });
 
-    // key: "setId::questionId"
-    const questionStats: Record<string, { correct: number, total: number, setId: string, setName: string, qId: any }> = {};
+    // key: "setId::questionIndex"
+    const questionStats: Record<string, { correct: number, total: number, setId: string, setName: string, qIdx: number, content: string }> = {};
     results.forEach(r => {
-      r.details.forEach(d => {
-        const key = `${r.setId}::${d.questionId}`;
-        if (!questionStats[key]) questionStats[key] = { correct: 0, total: 0, setId: r.setId, setName: r.setName, qId: d.questionId };
+      r.details.forEach((d: any, qIdx: number) => {
+        // 用 questionId（如果存在且是数字）或 数组索引 构造 key
+        const qId = d.questionId;
+        const idx = (qId !== undefined && qId !== null && !isNaN(Number(qId))) ? Number(qId) : qIdx;
+        const key = `${r.setId}::${idx}`;
+        if (!questionStats[key]) {
+          // 优先从缓存取内容，否则从 setQuestionsMap 找
+          const content = setQuestionsMap[r.setId]?.[idx] || `题目 ${idx + 1}`;
+          questionStats[key] = { correct: 0, total: 0, setId: r.setId, setName: r.setName, qIdx: idx, content };
+        }
         questionStats[key].total++;
         if (d.isCorrect) questionStats[key].correct++;
       });
@@ -225,10 +247,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
 
     const questionErrorRank = Object.entries(questionStats)
       .map(([key, s]) => {
-        const content = questionContentMap[key];
-        const label = content
-          ? (content.length > 40 ? content.slice(0, 40) + '…' : content)
-          : (s.qId !== undefined && s.qId !== null ? `${s.setName} · 题目 ${s.qId}` : `${s.setName} · 题目`);
+        const label = s.content.length > 40 ? s.content.slice(0, 40) + '…' : s.content;
         return {
           id: key,
           label,
@@ -422,20 +441,34 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     }
   };
 
-  const extendSubscription = async (studentId: string, currentExpiresAt: string) => {
+  const extendSubscription = (studentId: string, currentExpiresAt: string) => {
+    // 设置默认日期为当前到期日期加1天，或者默认1个月后
+    const defaultDate = new Date();
+    defaultDate.setMonth(defaultDate.getMonth() + 1);
+    setSelectedDate(defaultDate.toISOString().split('T')[0]);
+    setEditingStudentId(studentId);
+    setShowDatePicker(true);
+  };
+  
+  const handleSaveCustomDate = async () => {
+    if (!editingStudentId || !selectedDate) return;
+    
     try {
-      const current = currentExpiresAt ? new Date(currentExpiresAt) : new Date();
-      current.setDate(current.getDate() + 7);
-      const newExpiresAt = current.toISOString();
+      // 将日期设置为当天 23:59:59
+      const selectedDateTime = new Date(selectedDate);
+      selectedDateTime.setHours(23, 59, 59, 999);
+      const newExpiresAt = selectedDateTime.toISOString();
       
-      await updateDoc(doc(db, 'users', studentId), {
+      await updateDoc(doc(db, 'users', editingStudentId), {
         expiresAt: newExpiresAt
       });
       
-      setStudents(prev => prev.map(s => s.id === studentId ? { ...s, expiresAt: newExpiresAt } : s));
-      alert("Subscription extended by 7 days!");
+      setStudents(prev => prev.map(s => s.id === editingStudentId ? { ...s, expiresAt: newExpiresAt } : s));
+      setShowDatePicker(false);
+      setEditingStudentId(null);
+      alert("到期时间已更新！");
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `users/${studentId}`);
+      handleFirestoreError(error, OperationType.UPDATE, `users/${editingStudentId}`);
     }
   };
 
@@ -485,32 +518,58 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
         </header>
 
         {activeTab === 'overview' && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-2 bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100">
-              <h3 className="text-xl font-black mb-6">做题数据概览</h3>
-              <div className="grid grid-cols-3 gap-6 mb-8">
-                <div className="bg-teal-50 p-6 rounded-3xl">
-                  <p className="text-teal-600 text-xs font-bold uppercase mb-1">总练习次数</p>
-                  <p className="text-3xl font-black">{stats?.totalAttempts}</p>
-                </div>
-                <div className="bg-blue-50 p-6 rounded-3xl">
-                  <p className="text-blue-600 text-xs font-bold uppercase mb-1">平均正确率</p>
-                  <p className="text-3xl font-black">{stats?.avgScore}%</p>
-                </div>
-                <div className="bg-purple-50 p-6 rounded-3xl">
-                  <p className="text-purple-600 text-xs font-bold uppercase mb-1">活跃学生数</p>
-                  <p className="text-3xl font-black">{stats?.uniqueUsers}</p>
+          <div className="space-y-8">
+            {/* 第一行：统计数据 + 错题排行 */}
+            <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+              <div className="bg-teal-50 p-6 rounded-3xl">
+                <p className="text-teal-600 text-xs font-bold uppercase mb-1">总练习次数</p>
+                <p className="text-3xl font-black">{stats?.totalAttempts}</p>
+              </div>
+              <div className="bg-blue-50 p-6 rounded-3xl">
+                <p className="text-blue-600 text-xs font-bold uppercase mb-1">平均正确率</p>
+                <p className="text-3xl font-black">{stats?.avgScore}%</p>
+              </div>
+              <div className="bg-purple-50 p-6 rounded-3xl">
+                <p className="text-purple-600 text-xs font-bold uppercase mb-1">活跃学生数</p>
+                <p className="text-3xl font-black">{stats?.uniqueUsers}</p>
+              </div>
+              <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
+                <h3 className="text-sm font-black mb-4 flex items-center gap-2">
+                  <TrendingUp className="text-rose-500" /> 错题排行 TOP 3
+                </h3>
+                <div className="space-y-2">
+                  {stats?.questionErrorRank.slice(0, 3).map((q, idx) => (
+                    <div 
+                      key={q.id} 
+                      onClick={() => handleViewQuestion(q.id)}
+                      className="flex items-center justify-between gap-2 cursor-pointer hover:bg-gray-50 rounded-lg px-2 py-1 -mx-2 transition-colors"
+                    >
+                      <span className="w-5 h-5 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-[10px] font-black">
+                        {idx + 1}
+                      </span>
+                      <p className="flex-1 text-xs font-medium text-gray-600 truncate">{q.label}</p>
+                      <span className="text-rose-600 font-black text-xs">{q.errorRate}%</span>
+                    </div>
+                  ))}
+                  {(!stats?.questionErrorRank || stats.questionErrorRank.length === 0) && (
+                    <p className="text-xs text-gray-400 text-center py-2">暂无数据</p>
+                  )}
                 </div>
               </div>
             </div>
-            
+
+            {/* 错题排行完整版 */}
             <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100">
               <h3 className="text-xl font-black mb-6 flex items-center gap-2">
                 <TrendingUp className="text-rose-500" /> 错题排行
               </h3>
               <div className="space-y-4">
                 {stats?.questionErrorRank.slice(0, 10).map((q, idx) => (
-                  <div key={q.id} className="flex items-start justify-between p-4 bg-gray-50 rounded-2xl gap-4">
+                  <div 
+                    key={q.id} 
+                    onClick={() => handleViewQuestion(q.id)}
+                    className="flex items-start justify-between p-4 bg-gray-50 rounded-2xl gap-4 cursor-pointer hover:bg-gray-100 transition-colors"
+                  >
                     <div className="flex items-start gap-3 min-w-0">
                       <span className="w-6 h-6 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-xs font-black mt-0.5">
                         {idx + 1}
@@ -523,59 +582,9 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                     <span className="text-rose-600 font-black flex-shrink-0">{q.errorRate}% 错误率</span>
                   </div>
                 ))}
-              </div>
-            </div>
-
-            <div className="lg:col-span-3 bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100">
-              <div className="flex items-center justify-between mb-8">
-                <h3 className="text-xl font-black flex items-center gap-2">
-                  <Clock className="text-teal-600" /> 最近练习记录
-                </h3>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead>
-                    <tr className="text-gray-400 text-xs uppercase font-bold border-b border-gray-50">
-                      <th className="pb-4">学生 / 游客</th>
-                      <th className="pb-4">练习题目</th>
-                      <th className="pb-4 text-center">正确率</th>
-                      <th className="pb-4 text-center">用时</th>
-                      <th className="pb-4">完成时间</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-gray-50">
-                    {results.slice(0, 20).map((r) => (
-                      <tr key={r.id} className="hover:bg-gray-50 transition-colors">
-                        <td className="py-4">
-                          <div className="flex flex-col">
-                            <span className="font-bold text-gray-900">{r.userName}</span>
-                            <span className={cn(
-                              "text-[10px] font-bold uppercase tracking-wider",
-                              r.userId === 'guest' ? "text-gray-400" : "text-teal-500"
-                            )}>
-                              {r.userId === 'guest' ? '游客' : '正式学生'}
-                            </span>
-                          </div>
-                        </td>
-                        <td className="py-4 font-medium text-gray-600">{r.setName}</td>
-                        <td className="py-4 text-center">
-                          <span className={cn(
-                            "px-3 py-1 rounded-full text-xs font-black",
-                            r.score >= 80 ? "bg-green-50 text-green-600" : r.score >= 60 ? "bg-orange-50 text-orange-600" : "bg-red-50 text-red-600"
-                          )}>
-                            {r.score}%
-                          </span>
-                        </td>
-                        <td className="py-4 text-center font-medium text-gray-500">
-                          {Math.floor(r.timeSpent / 60)}:{String(r.timeSpent % 60).padStart(2, '0')}
-                        </td>
-                        <td className="py-4 text-sm text-gray-400">
-                          {r.completedAt ? new Date(r.completedAt).toLocaleString() : '未知'}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                {(!stats?.questionErrorRank || stats.questionErrorRank.length === 0) && (
+                  <p className="text-center text-gray-400 py-8">暂无错题数据</p>
+                )}
               </div>
             </div>
           </div>
@@ -920,6 +929,58 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                 </tbody>
               </table>
             </div>
+
+            {/* 最近练习记录 */}
+            <div className="mt-8 pt-8 border-t border-gray-100">
+              <h3 className="text-xl font-black mb-6 flex items-center gap-2">
+                <Clock className="text-teal-600" /> 最近练习记录
+              </h3>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left">
+                  <thead>
+                    <tr className="text-gray-400 text-xs uppercase font-bold border-b border-gray-50">
+                      <th className="pb-4">学生 / 游客</th>
+                      <th className="pb-4">练习题目</th>
+                      <th className="pb-4 text-center">正确率</th>
+                      <th className="pb-4 text-center">用时</th>
+                      <th className="pb-4">完成时间</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {results.slice(0, 20).map((r) => (
+                      <tr key={r.id} className="hover:bg-gray-50 transition-colors">
+                        <td className="py-4">
+                          <div className="flex flex-col">
+                            <span className="font-bold text-gray-900">{r.userName}</span>
+                            <span className={cn(
+                              "text-[10px] font-bold uppercase tracking-wider",
+                              r.userId === 'guest' ? "text-gray-400" : "text-teal-500"
+                            )}>
+                              {r.userId === 'guest' ? '游客' : '正式学生'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="py-4 font-medium text-gray-600">{r.setName}</td>
+                        <td className="py-4 text-center">
+                          <span className={cn(
+                            "px-3 py-1 rounded-full text-xs font-black",
+                            r.score >= 80 ? "bg-green-50 text-green-600" : r.score >= 60 ? "bg-orange-50 text-orange-600" : "bg-red-50 text-red-600"
+                          )}>
+                            {r.score}%
+                          </span>
+                        </td>
+                        <td className="py-4 text-center font-medium text-gray-500">
+                          {Math.floor(r.timeSpent / 60)}:{String(r.timeSpent % 60).padStart(2, '0')}
+                        </td>
+                        <td className="py-4 text-sm text-gray-400">
+                          {r.completedAt ? new Date(r.completedAt).toLocaleString() : '未知'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
 
@@ -958,6 +1019,134 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
           </div>
         )}
       </div>
+
+      {/* 题目详情弹窗 */}
+      {selectedQuestion && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setSelectedQuestion(null)}>
+          <div 
+            className="bg-white rounded-3xl p-8 max-w-2xl w-full max-h-[80vh] overflow-y-auto shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-6">
+              <h3 className="text-xl font-black text-gray-900">题目详情</h3>
+              <button 
+                onClick={() => setSelectedQuestion(null)}
+                className="p-2 text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div className="space-y-6">
+              {/* 题目标签 */}
+              <div className="flex items-center gap-3">
+                <span className="px-3 py-1 bg-teal-100 text-teal-700 rounded-full text-xs font-bold">
+                  {selectedQuestion.set.name}
+                </span>
+                <span className="px-3 py-1 bg-rose-100 text-rose-700 rounded-full text-xs font-bold">
+                  第 {selectedQuestion.idx + 1} 题
+                </span>
+              </div>
+
+              {/* 对话内容 */}
+              {selectedQuestion.question.conversation?.speaker1?.text && (
+                <div className="bg-blue-50 p-6 rounded-2xl">
+                  <p className="text-xs font-bold text-blue-600 uppercase mb-2">听力对话</p>
+                  <p className="text-gray-800 leading-relaxed">
+                    {selectedQuestion.question.conversation.speaker1.text}
+                  </p>
+                </div>
+              )}
+
+              {/* 模板句子 */}
+              {selectedQuestion.question.template && (
+                <div className="bg-gray-50 p-6 rounded-2xl">
+                  <p className="text-xs font-bold text-gray-600 uppercase mb-2">填空模板</p>
+                  <p className="text-gray-800 leading-relaxed font-medium">
+                    {selectedQuestion.question.template.replace(/\{(\d+)\}/g, '____')}
+                  </p>
+                </div>
+              )}
+
+              {/* 正确答案 */}
+              {selectedQuestion.question.correctSentence && selectedQuestion.question.correctSentence.length > 0 && (
+                <div className="bg-green-50 p-6 rounded-2xl">
+                  <p className="text-xs font-bold text-green-600 uppercase mb-2">正确答案</p>
+                  <p className="text-green-800 font-black text-lg">
+                    {selectedQuestion.question.correctSentence.join(' ')}
+                  </p>
+                </div>
+              )}
+
+              {/* 干扰词 */}
+              {selectedQuestion.question.words && selectedQuestion.question.words.length > 0 && (
+                <div className="bg-orange-50 p-6 rounded-2xl">
+                  <p className="text-xs font-bold text-orange-600 uppercase mb-2">备选词（含干扰项）</p>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedQuestion.question.words.map((word: string, i: number) => (
+                      <span key={i} className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-sm font-medium">
+                        {word}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* 日期选择器弹窗 */}
+      {showDatePicker && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" onClick={() => setShowDatePicker(false)}></div>
+          <div className="relative bg-white rounded-[2rem] p-8 shadow-2xl max-w-md w-full">
+            <button 
+              onClick={() => setShowDatePicker(false)}
+              className="absolute top-4 right-4 p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-all"
+            >
+              <X size={20} />
+            </button>
+            
+            <div className="text-center mb-8">
+              <div className="w-16 h-16 bg-teal-50 text-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                <Calendar size={32} />
+              </div>
+              <h3 className="text-2xl font-black text-gray-900 mb-2">设置到期时间</h3>
+              <p className="text-gray-500">选择学生账号到期的日期（自动设置为当天 23:59:59）</p>
+            </div>
+            
+            <div className="space-y-6">
+              <div>
+                <label className="block text-sm font-bold text-gray-700 mb-2">到期日期</label>
+                <input 
+                  type="date" 
+                  value={selectedDate}
+                  onChange={(e) => setSelectedDate(e.target.value)}
+                  className="w-full px-6 py-4 bg-gray-50 border-2 border-gray-200 rounded-2xl focus:border-teal-500 focus:bg-white outline-none text-lg font-medium"
+                  min={new Date().toISOString().split('T')[0]}
+                />
+                <p className="text-xs text-gray-400 mt-2">到期时间将自动设置为所选日期的 23:59:59</p>
+              </div>
+              
+              <div className="flex gap-4">
+                <button
+                  onClick={() => setShowDatePicker(false)}
+                  className="flex-1 py-4 bg-gray-100 text-gray-600 rounded-2xl font-bold hover:bg-gray-200 transition-all"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleSaveCustomDate}
+                  className="flex-1 py-4 bg-teal-600 text-white rounded-2xl font-bold hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20"
+                >
+                  确认保存
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
