@@ -646,27 +646,26 @@ function App() {
     }
   };
   
-  const prevQuestion = () => {
-    if (currentIndex === 0) return;
-    
-    // 恢复上一题的答案
-    const newHistory = [...answerHistory];
-    const prevAnswers = newHistory.pop();
-    setAnswerHistory(newHistory);
-    
-    // 恢复分数（如果之前那题是对的，减回去）
-    const prevResults = [...results];
-    const lastResult = prevResults.pop();
-    setResults(prevResults);
-    if (lastResult?.isCorrect) {
-      setScore(s => s - 1);
-    }
-    
-    // 回到上一题
-    const prevIdx = currentIndex - 1;
-    setCurrentIndex(prevIdx);
-    setPlacedWords(prevAnswers || new Array(questions[prevIdx].correctSentence.length).fill(null));
-  };
+const prevQuestion = () => {
+  if (currentIndex === 0) return;
+  
+  // 保存当前答案到历史记录
+  setAnswerHistory(prev => [...prev, [...placedWords]]);
+  
+  // 恢复分数
+  if (results.length > 0 && results[results.length - 1]?.isCorrect) {
+    setScore(s => s - 1);
+  }
+  setResults(prev => prev.slice(0, -1));
+  
+  // 回到上一题
+  const prevIdx = currentIndex - 1;
+  setCurrentIndex(prevIdx);
+  
+  const prevAnswers = answerHistory[answerHistory.length - 1];
+  setPlacedWords(prevAnswers || new Array(questions[prevIdx].correctSentence.length).fill(null));
+  setAnswerHistory(prev => prev.slice(0, -1));
+};
 
   const saveResult = async (duration: number) => {
     if (!currentSet) return;
