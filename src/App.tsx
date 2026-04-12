@@ -472,6 +472,8 @@ function App() {
       alert(role === 'student' ? '注册成功！欢迎加入写作团。' : '注册成功！已开启免费练习模式。');
       setFilterType(intendedMode === 'pro' ? 'pro' : 'free');
       setView('home');
+      // 强制刷新确保 Firebase Auth 状态完全同步
+      window.location.reload();
     } catch (error: any) {
       console.error('Registration error:', error);
       alert('注册失败原因：' + error.message);
