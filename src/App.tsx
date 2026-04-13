@@ -345,18 +345,11 @@ function App() {
     setLoadingSets(true);
     try {
       const questionsSnapshot = await getDocs(collection(db, 'questions'));
-      const rawData = questionsSnapshot.docs.map(doc => ({
+      const data = questionsSnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       })) as QuestionSet[];
-      // 按 order 排序
-      rawData.sort((a, b) => {
-        if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
-        if (a.order !== undefined) return -1;
-        if (b.order !== undefined) return 1;
-        return 0;
-      });
-      setAvailableSets(rawData);
+      setAvailableSets(data);
     } catch (error) {
       handleFirestoreError(error, OperationType.LIST, 'questions');
     } finally {
@@ -540,7 +533,7 @@ function App() {
       setScore(0);
       setIsFinished(false);
       setResults([]);
-      setTimeLeft(setData.timeLimit || 360); // 使用题组自定义时间，默认6分钟
+      setTimeLeft(360);
       setTimerActive(true);
       if (setData.questions && setData.questions.length > 0) {
         initQuestion(setData.questions[0]);
@@ -613,8 +606,7 @@ function App() {
   const finishQuiz = () => {
     setIsFinished(true);
     setTimerActive(false);
-    const timeLimit = currentSet?.timeLimit || 360;
-    const duration = timeLimit - timeLeft;
+    const duration = 360 - timeLeft;
     setTimeTaken(duration);
     
     // 先保存结果（游客不填写也保存匿名记录）
@@ -635,71 +627,45 @@ function App() {
   const nextQuestion = () => {
     const currentQ = questions[currentIndex];
     const isCorrect = JSON.stringify(placedWords) === JSON.stringify(currentQ.correctSentence);
-
-    // 把当前题答案按 index 保存（按位置存，方便前进/后退都能恢复）
-    const newHistory = [...answerHistory];
-    newHistory[currentIndex] = [...placedWords];
-    setAnswerHistory(newHistory);
-
-    // 更新 results（按 index 对齐，覆盖已有）
-    const newResults = [...results];
-    newResults[currentIndex] = {
-      isCorrect,
-      userAnswer: placedWords.map(w => w || ""),
+    if (isCorrect) setScore(s => s + 1);
+    setResults(prev => [...prev, { 
+      isCorrect, 
+      userAnswer: placedWords.map(w => w || ""), 
       correctAnswer: currentQ.correctSentence || []
-    };
-    setResults(newResults);
-
-    // 重算分数（从 newResults 重新统计，避免累积错误）
-    setScore(newResults.filter(r => r.isCorrect).length);
+    }]);
+    
+    // 保存当前答案到历史记录
+    setAnswerHistory(prev => [...prev, [...placedWords]]);
 
     if (currentIndex < questions.length - 1) {
       const nextIdx = currentIndex + 1;
       setCurrentIndex(nextIdx);
-      // 如果已经做过这道题（返回后再前进），恢复之前的答案
-      if (newHistory[nextIdx]) {
-        setPlacedWords([...newHistory[nextIdx]]);
-      } else {
-        initQuestion(questions[nextIdx]);
-      }
+      initQuestion(questions[nextIdx]);
     } else {
       finishQuiz();
     }
   };
   
-  const prevQuestion = () => {
-    if (currentIndex === 0) return;
-
-    // 先把当前答案按 index 保存
-    const newHistory = [...answerHistory];
-    newHistory[currentIndex] = [...placedWords];
-    setAnswerHistory(newHistory);
-
-    const prevIdx = currentIndex - 1;
-    setCurrentIndex(prevIdx);
-
-    // 恢复上一题的答案（如果有保存过）
-    if (newHistory[prevIdx]) {
-      setPlacedWords([...newHistory[prevIdx]]);
-    } else {
-      initQuestion(questions[prevIdx]);
-    }
-
-    // 回退 results 到 prevIdx 之前（不含 prevIdx，因为上一题还在做）
-    const trimmedResults = newHistory
-      .slice(0, prevIdx)
-      .map((savedAnswer, i) => {
-        const q = questions[i];
-        const isCorrect = JSON.stringify(savedAnswer) === JSON.stringify(q.correctSentence);
-        return {
-          isCorrect,
-          userAnswer: savedAnswer.map(w => w || ""),
-          correctAnswer: q.correctSentence || []
-        };
-      });
-    setResults(trimmedResults);
-    setScore(trimmedResults.filter(r => r.isCorrect).length);
-  };
+const prevQuestion = () => {
+  if (currentIndex === 0) return;
+  
+  // 保存当前答案到历史记录
+  setAnswerHistory(prev => [...prev, [...placedWords]]);
+  
+  // 恢复分数
+  if (results.length > 0 && results[results.length - 1]?.isCorrect) {
+    setScore(s => s - 1);
+  }
+  setResults(prev => prev.slice(0, -1));
+  
+  // 回到上一题
+  const prevIdx = currentIndex - 1;
+  setCurrentIndex(prevIdx);
+  
+  const prevAnswers = answerHistory[answerHistory.length - 1];
+  setPlacedWords(prevAnswers || new Array(questions[prevIdx].correctSentence.length).fill(null));
+  setAnswerHistory(prev => prev.slice(0, -1));
+};
 
   const saveResult = async (duration: number) => {
     if (!currentSet) return;
