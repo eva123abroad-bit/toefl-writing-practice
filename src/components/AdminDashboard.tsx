@@ -28,7 +28,9 @@ import {
   Key,
   Copy,
   RefreshCw,
-  X
+  X,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from './lib/utils';
@@ -75,7 +77,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'sets' | 'students' | 'codes'>('overview');
   const [studentFilter, setStudentFilter] = useState<'all' | 'pro' | 'free'>('all');
-  const [selectedQuestion, setSelectedQuestion] = useState<{set: any, question: any, idx: number} | null>(null);
+  const [selectedQuestion, setSelectedQuestion] = useState<{set: any, question: any, idx: number, wrongAnswers?: {userName: string, answer: string}[], correctAnswer?: string} | null>(null);
   
   // 日期选择弹窗状态
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -86,6 +88,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   const [editingSetId, setEditingSetId] = useState<string | null>(null);
   const [newSetName, setNewSetName] = useState('');
   const [isFree, setIsFree] = useState(true);
+  const [timeLimit, setTimeLimit] = useState<number>(10); // 默认10分钟
   const [bulkText, setBulkText] = useState('');
   const [showBulkInput, setShowBulkInput] = useState(false);
   const [newQuestions, setNewQuestions] = useState<Partial<Question>[]>(
@@ -201,16 +204,6 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     fetchData();
   }, []);
 
-  // 点击错题查看原题
-  const handleViewQuestion = (key: string) => {
-    const [setId, idxStr] = key.split('::');
-    const idx = parseInt(idxStr);
-    const set = sets.find(s => s.id === setId);
-    if (set && set.questions && set.questions[idx]) {
-      setSelectedQuestion({ set, question: set.questions[idx], idx });
-    }
-  };
-
   // 核心逻辑：错题排行 & 数据看板
   const stats = useMemo(() => {
     if (results.length === 0) return null;
@@ -228,20 +221,38 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     });
 
     // key: "setId::questionIndex"
-    const questionStats: Record<string, { correct: number, total: number, setId: string, setName: string, qIdx: number, content: string }> = {};
+    const questionStats: Record<string, { 
+      correct: number, total: number, setId: string, setName: string, qIdx: number, content: string,
+      correctAnswer: string,
+      wrongAnswers: { userName: string, answer: string }[]
+    }> = {};
     results.forEach(r => {
       r.details.forEach((d: any, qIdx: number) => {
-        // 用 questionId（如果存在且是数字）或 数组索引 构造 key
         const qId = d.questionId;
         const idx = (qId !== undefined && qId !== null && !isNaN(Number(qId))) ? Number(qId) : qIdx;
         const key = `${r.setId}::${idx}`;
         if (!questionStats[key]) {
-          // 优先从缓存取内容，否则从 setQuestionsMap 找
           const content = setQuestionsMap[r.setId]?.[idx] || `题目 ${idx + 1}`;
-          questionStats[key] = { correct: 0, total: 0, setId: r.setId, setName: r.setName, qIdx: idx, content };
+          const correctArr = Array.isArray(d.correctAnswer) ? d.correctAnswer : [];
+          questionStats[key] = { 
+            correct: 0, total: 0, setId: r.setId, setName: r.setName, qIdx: idx, content,
+            correctAnswer: correctArr.join(' '),
+            wrongAnswers: []
+          };
         }
         questionStats[key].total++;
-        if (d.isCorrect) questionStats[key].correct++;
+        if (d.isCorrect) {
+          questionStats[key].correct++;
+        } else {
+          const userAnswerArr = Array.isArray(d.userAnswer) ? d.userAnswer : [];
+          const answerStr = userAnswerArr.filter(Boolean).join(' ');
+          if (answerStr) {
+            questionStats[key].wrongAnswers.push({
+              userName: r.userName || r.userId?.slice(0, 8) || '匿名',
+              answer: answerStr
+            });
+          }
+        }
       });
     });
 
@@ -254,7 +265,9 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
           setName: s.setName,
           errorRate: Math.round(((s.total - s.correct) / s.total) * 100),
           total: s.total,
-          correct: s.correct
+          correct: s.correct,
+          correctAnswer: s.correctAnswer,
+          wrongAnswers: s.wrongAnswers
         };
       })
       .sort((a, b) => b.errorRate - a.errorRate);
@@ -276,6 +289,23 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     });
     return stats;
   }, [results]);
+
+  // 点击错题查看详情（放在stats之后，以便获取wrongAnswers）
+  const handleViewQuestion = (key: string) => {
+    const [setId, idxStr] = key.split('::');
+    const idx = parseInt(idxStr);
+    const set = sets.find(s => s.id === setId);
+    const questionData = stats?.questionErrorRank.find(q => q.id === key);
+    if (set && set.questions && set.questions[idx]) {
+      setSelectedQuestion({ 
+        set, 
+        question: set.questions[idx], 
+        idx,
+        wrongAnswers: questionData?.wrongAnswers,
+        correctAnswer: questionData?.correctAnswer
+      });
+    }
+  };
 
   // 生成 8位 随机激活码
   const generateCode = async () => {
@@ -315,6 +345,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
         isFree,
         questions: newQuestions,
         questionCount: newQuestions.length,
+        timeLimit: timeLimit * 60, // 转换为秒存储
         updatedAt: Timestamp.now()
       };
 
@@ -402,6 +433,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
       setNewSetName(data.name);
       setIsFree(data.isFree);
       setNewQuestions(data.questions);
+      setTimeLimit(data.timeLimit ? Math.round(data.timeLimit / 60) : 10); // 秒转分钟
       setActiveTab('sets');
     } catch (error) {
       handleFirestoreError(error, OperationType.GET, `questions/${id}`);
@@ -536,6 +568,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
               <div className="bg-white p-6 rounded-3xl shadow-sm border border-gray-100">
                 <h3 className="text-sm font-black mb-4 flex items-center gap-2">
                   <TrendingUp className="text-rose-500" /> 错题排行 TOP 3
+                  <span className="text-xs font-normal text-gray-400 ml-auto">点击查看详情</span>
                 </h3>
                 <div className="space-y-2">
                   {stats?.questionErrorRank.slice(0, 3).map((q, idx) => (
@@ -562,9 +595,10 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
             <div className="bg-white p-8 rounded-[2rem] shadow-sm border border-gray-100">
               <h3 className="text-xl font-black mb-6 flex items-center gap-2">
                 <TrendingUp className="text-rose-500" /> 错题排行
+                <span className="text-sm font-normal text-gray-400 ml-2">点击任意题目查看错误详情</span>
               </h3>
               <div className="space-y-4">
-                {stats?.questionErrorRank.slice(0, 10).map((q, idx) => (
+                {stats?.questionErrorRank.map((q, idx) => (
                   <div 
                     key={q.id} 
                     onClick={() => handleViewQuestion(q.id)}
@@ -576,10 +610,10 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                       </span>
                       <div className="min-w-0">
                         <p className="font-bold text-gray-700 text-sm leading-snug">{q.label}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">{q.setName} · {q.total} 次作答</p>
+                        <p className="text-xs text-gray-400 mt-0.5">{q.setName} · {q.total} 次作答 · {q.total - q.correct}人错</p>
                       </div>
                     </div>
-                    <span className="text-rose-600 font-black flex-shrink-0">{q.errorRate}% 错误率</span>
+                    <span className="text-rose-600 font-black flex-shrink-0">{q.errorRate}%</span>
                   </div>
                 ))}
                 {(!stats?.questionErrorRank || stats.questionErrorRank.length === 0) && (
@@ -750,6 +784,19 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                         Pro (Locked)
                       </button>
                     </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">做题时间限制（分钟）</label>
+                    <input 
+                      type="number" 
+                      min="1"
+                      max="120"
+                      value={timeLimit}
+                      onChange={e => setTimeLimit(Number(e.target.value))}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-teal-500 outline-none"
+                      placeholder="10"
+                    />
+                    <p className="text-xs text-gray-400 mt-1">留空或填0表示不限制时间</p>
                   </div>
                 </div>
 
@@ -1078,6 +1125,38 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                   <p className="text-green-800 font-black text-lg">
                     {selectedQuestion.question.correctSentence.join(' ')}
                   </p>
+                </div>
+              )}
+
+              {/* 错误详情 */}
+              {selectedQuestion.wrongAnswers && selectedQuestion.wrongAnswers.length > 0 && (
+                <div className="bg-rose-50 p-6 rounded-2xl">
+                  <p className="text-xs font-bold text-rose-600 uppercase mb-3">学生错误答案（共{selectedQuestion.wrongAnswers.length}人错）</p>
+                  <div className="space-y-2">
+                    {(() => {
+                      // 合并相同错误答案
+                      const merged: {users: string[], answer: string}[] = [];
+                      selectedQuestion.wrongAnswers.forEach((w: {userName: string, answer: string}) => {
+                        const exist = merged.find(m => m.answer === w.answer);
+                        if (exist) {
+                          exist.users.push(w.userName);
+                        } else {
+                          merged.push({users: [w.userName], answer: w.answer});
+                        }
+                      });
+                      return merged.map((m, i) => (
+                        <div key={i} className="flex items-start gap-2 bg-white rounded-xl p-3">
+                          <span className="w-5 h-5 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-[10px] font-black mt-0.5">
+                            {i + 1}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-rose-700 font-medium text-sm">{m.users.join(', ')}</p>
+                            <p className="text-rose-500 text-xs mt-0.5">{m.answer}</p>
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
                 </div>
               )}
 

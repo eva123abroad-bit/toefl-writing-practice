@@ -627,45 +627,63 @@ function App() {
   const nextQuestion = () => {
     const currentQ = questions[currentIndex];
     const isCorrect = JSON.stringify(placedWords) === JSON.stringify(currentQ.correctSentence);
-    if (isCorrect) setScore(s => s + 1);
-    setResults(prev => [...prev, { 
-      isCorrect, 
-      userAnswer: placedWords.map(w => w || ""), 
+
+    const newHistory = [...answerHistory];
+    newHistory[currentIndex] = [...placedWords];
+    setAnswerHistory(newHistory);
+
+    const newResults = [...results];
+    newResults[currentIndex] = {
+      isCorrect,
+      userAnswer: placedWords.map(w => w || ""),
       correctAnswer: currentQ.correctSentence || []
-    }]);
-    
-    // 保存当前答案到历史记录
-    setAnswerHistory(prev => [...prev, [...placedWords]]);
+    };
+    setResults(newResults);
+    setScore(newResults.filter(r => r.isCorrect).length);
 
     if (currentIndex < questions.length - 1) {
       const nextIdx = currentIndex + 1;
       setCurrentIndex(nextIdx);
-      initQuestion(questions[nextIdx]);
+      if (newHistory[nextIdx]) {
+        setPlacedWords([...newHistory[nextIdx]]);
+      } else {
+        initQuestion(questions[nextIdx]);
+      }
     } else {
       finishQuiz();
     }
   };
   
-const prevQuestion = () => {
-  if (currentIndex === 0) return;
-  
-  // 保存当前答案到历史记录
-  setAnswerHistory(prev => [...prev, [...placedWords]]);
-  
-  // 恢复分数
-  if (results.length > 0 && results[results.length - 1]?.isCorrect) {
-    setScore(s => s - 1);
-  }
-  setResults(prev => prev.slice(0, -1));
-  
-  // 回到上一题
-  const prevIdx = currentIndex - 1;
-  setCurrentIndex(prevIdx);
-  
-  const prevAnswers = answerHistory[answerHistory.length - 1];
-  setPlacedWords(prevAnswers || new Array(questions[prevIdx].correctSentence.length).fill(null));
-  setAnswerHistory(prev => prev.slice(0, -1));
-};
+  const prevQuestion = () => {
+    if (currentIndex === 0) return;
+
+    const newHistory = [...answerHistory];
+    newHistory[currentIndex] = [...placedWords];
+    setAnswerHistory(newHistory);
+
+    const prevIdx = currentIndex - 1;
+    setCurrentIndex(prevIdx);
+
+    if (newHistory[prevIdx]) {
+      setPlacedWords([...newHistory[prevIdx]]);
+    } else {
+      initQuestion(questions[prevIdx]);
+    }
+
+    const trimmedResults = newHistory
+      .slice(0, prevIdx)
+      .map((savedAnswer, i) => {
+        const q = questions[i];
+        const isCorrect = JSON.stringify(savedAnswer) === JSON.stringify(q.correctSentence);
+        return {
+          isCorrect,
+          userAnswer: savedAnswer.map(w => w || ""),
+          correctAnswer: q.correctSentence || []
+        };
+      });
+    setResults(trimmedResults);
+    setScore(trimmedResults.filter(r => r.isCorrect).length);
+  };
 
   const saveResult = async (duration: number) => {
     if (!currentSet) return;
