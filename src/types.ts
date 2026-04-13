@@ -32,6 +32,9 @@ export interface QuestionSet {
   isFree: boolean;
   questions?: Question[];
   questionCount?: number;
+  timeLimit?: number; // 做题时间限制，单位：秒
+  order?: number; // 题组排序顺序
+  createdAt?: any;
 }
 
 export interface UserResult {

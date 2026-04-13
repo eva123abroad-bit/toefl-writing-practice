@@ -28,7 +28,9 @@ import {
   Key,
   Copy,
   RefreshCw,
-  X
+  X,
+  ChevronUp,
+  ChevronDown,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from './lib/utils';
@@ -75,7 +77,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'overview' | 'sets' | 'students' | 'codes'>('overview');
   const [studentFilter, setStudentFilter] = useState<'all' | 'pro' | 'free'>('all');
-  const [selectedQuestion, setSelectedQuestion] = useState<{set: any, question: any, idx: number} | null>(null);
+  const [selectedQuestion, setSelectedQuestion] = useState<{set: any, question: any, idx: number, wrongAnswers?: {names: string, answer: string}[], correctAnswer?: string, total?: number, wrongCount?: number} | null>(null);
   
   // 日期选择弹窗状态
   const [showDatePicker, setShowDatePicker] = useState(false);
@@ -86,6 +88,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   const [editingSetId, setEditingSetId] = useState<string | null>(null);
   const [newSetName, setNewSetName] = useState('');
   const [isFree, setIsFree] = useState(true);
+  const [newSetTimeLimit, setNewSetTimeLimit] = useState<number>(6); // 分钟
   const [bulkText, setBulkText] = useState('');
   const [showBulkInput, setShowBulkInput] = useState(false);
   const [newQuestions, setNewQuestions] = useState<Partial<Question>[]>(
@@ -163,9 +166,19 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        // Fetch sets
+        // Fetch sets (按 order 排序，兼容旧数据：没有 order 的用 createdAt 兜底)
         const questionsSnapshot = await getDocs(collection(db, 'questions'));
-        setSets(questionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        const rawSets = questionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        rawSets.sort((a, b) => {
+          if (a.order !== undefined && b.order !== undefined) return a.order - b.order;
+          if (a.order !== undefined) return -1;
+          if (b.order !== undefined) return 1;
+          // 都没有 order 则按创建时间
+          const aTime = a.createdAt?.toDate?.()?.getTime?.() || 0;
+          const bTime = b.createdAt?.toDate?.()?.getTime?.() || 0;
+          return aTime - bTime;
+        });
+        setSets(rawSets);
 
         // Fetch results
         const resultsSnapshot = await getDocs(query(collection(db, 'results'), orderBy('completedAt', 'desc'), limit(500)));
@@ -201,13 +214,38 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     fetchData();
   }, []);
 
-  // 点击错题查看原题
-  const handleViewQuestion = (key: string) => {
-    const [setId, idxStr] = key.split('::');
+  // 点击错题查看原题 + 错误详情
+  const handleViewQuestion = (qData: {
+    id: string;
+    wrongAnswers: { userName: string; answer: string }[];
+    correctAnswer: string;
+    total: number;
+  }) => {
+    const [setId, idxStr] = qData.id.split('::');
     const idx = parseInt(idxStr);
     const set = sets.find(s => s.id === setId);
+
+    // 合并相同错误答案
+    const grouped: Record<string, string[]> = {};
+    qData.wrongAnswers.forEach(w => {
+      if (!grouped[w.answer]) grouped[w.answer] = [];
+      grouped[w.answer].push(w.userName);
+    });
+    const mergedWrongAnswers = Object.entries(grouped).map(([answer, names]) => ({
+      answer,
+      names: names.join(', ')
+    }));
+
     if (set && set.questions && set.questions[idx]) {
-      setSelectedQuestion({ set, question: set.questions[idx], idx });
+      setSelectedQuestion({
+        set,
+        question: set.questions[idx],
+        idx,
+        wrongAnswers: mergedWrongAnswers,
+        correctAnswer: qData.correctAnswer,
+        total: qData.total,
+        wrongCount: qData.wrongAnswers.length
+      });
     }
   };
 
@@ -228,7 +266,11 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     });
 
     // key: "setId::questionIndex"
-    const questionStats: Record<string, { correct: number, total: number, setId: string, setName: string, qIdx: number, content: string }> = {};
+    const questionStats: Record<string, { 
+      correct: number, total: number, setId: string, setName: string, qIdx: number, content: string,
+      correctAnswer: string,
+      wrongAnswers: { userName: string, answer: string }[]
+    }> = {};
     results.forEach(r => {
       r.details.forEach((d: any, qIdx: number) => {
         // 用 questionId（如果存在且是数字）或 数组索引 构造 key
@@ -238,10 +280,27 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
         if (!questionStats[key]) {
           // 优先从缓存取内容，否则从 setQuestionsMap 找
           const content = setQuestionsMap[r.setId]?.[idx] || `题目 ${idx + 1}`;
-          questionStats[key] = { correct: 0, total: 0, setId: r.setId, setName: r.setName, qIdx: idx, content };
+          const correctArr = Array.isArray(d.correctAnswer) ? d.correctAnswer : [];
+          questionStats[key] = { 
+            correct: 0, total: 0, setId: r.setId, setName: r.setName, qIdx: idx, content,
+            correctAnswer: correctArr.join(' '),
+            wrongAnswers: []
+          };
         }
         questionStats[key].total++;
-        if (d.isCorrect) questionStats[key].correct++;
+        if (d.isCorrect) {
+          questionStats[key].correct++;
+        } else {
+          // 记录错误答案
+          const userAnswerArr = Array.isArray(d.userAnswer) ? d.userAnswer : [];
+          const answerStr = userAnswerArr.filter(Boolean).join(' ');
+          if (answerStr) {
+            questionStats[key].wrongAnswers.push({
+              userName: r.userName || r.userId?.slice(0, 8) || '匿名',
+              answer: answerStr
+            });
+          }
+        }
       });
     });
 
@@ -254,7 +313,9 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
           setName: s.setName,
           errorRate: Math.round(((s.total - s.correct) / s.total) * 100),
           total: s.total,
-          correct: s.correct
+          correct: s.correct,
+          correctAnswer: s.correctAnswer,
+          wrongAnswers: s.wrongAnswers
         };
       })
       .sort((a, b) => b.errorRate - a.errorRate);
@@ -315,23 +376,25 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
         isFree,
         questions: newQuestions,
         questionCount: newQuestions.length,
+        timeLimit: newSetTimeLimit * 60, // 转换为秒存储
         updatedAt: Timestamp.now()
       };
 
       if (editingSetId) {
         await updateDoc(doc(db, 'questions', editingSetId), setData);
-        setSets(prev => prev.map(s => s.id === editingSetId ? { ...s, ...setData, questionCount: newQuestions.length } : s));
+        setSets(prev => prev.map(s => s.id === editingSetId ? { ...s, ...setData, questionCount: newQuestions.length, timeLimit: newSetTimeLimit * 60 } : s));
       } else {
         const docRef = await addDoc(collection(db, 'questions'), {
           ...setData,
           createdAt: Timestamp.now(),
           order: sets.length
         });
-        setSets(prev => [...prev, { id: docRef.id, ...setData, questionCount: newQuestions.length }]);
+        setSets(prev => [...prev, { id: docRef.id, ...setData, questionCount: newQuestions.length, timeLimit: newSetTimeLimit * 60 }]);
       }
       
       setNewSetName('');
       setEditingSetId(null);
+      setNewSetTimeLimit(6);
       setNewQuestions(Array(10).fill(null).map((_, i) => ({
         id: i + 1,
         isFree: true,
@@ -375,6 +438,14 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
     setNewQuestions(updated);
   };
 
+  const handleQuestionReorder = (idx: number, direction: 'up' | 'down') => {
+    const newArr = [...newQuestions];
+    const targetIndex = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIndex < 0 || targetIndex >= newArr.length) return;
+    [newArr[idx], newArr[targetIndex]] = [newArr[targetIndex], newArr[idx]];
+    setNewQuestions(newArr);
+  };
+
   const addQuestion = () => {
     setNewQuestions(prev => [...prev, {
       id: prev.length + 1,
@@ -402,6 +473,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
       setNewSetName(data.name);
       setIsFree(data.isFree);
       setNewQuestions(data.questions);
+      setNewSetTimeLimit(data.timeLimit ? Math.round(data.timeLimit / 60) : 6); // 秒转分钟
       setActiveTab('sets');
     } catch (error) {
       handleFirestoreError(error, OperationType.GET, `questions/${id}`);
@@ -539,9 +611,9 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                 </h3>
                 <div className="space-y-2">
                   {stats?.questionErrorRank.slice(0, 3).map((q, idx) => (
-                    <div 
-                      key={q.id} 
-                      onClick={() => handleViewQuestion(q.id)}
+                    <div
+                      key={q.id}
+                      onClick={() => handleViewQuestion(q)}
                       className="flex items-center justify-between gap-2 cursor-pointer hover:bg-gray-50 rounded-lg px-2 py-1 -mx-2 transition-colors"
                     >
                       <span className="w-5 h-5 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-[10px] font-black">
@@ -564,11 +636,11 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                 <TrendingUp className="text-rose-500" /> 错题排行
               </h3>
               <div className="space-y-4">
-                {stats?.questionErrorRank.slice(0, 10).map((q, idx) => (
-                  <div 
-                    key={q.id} 
-                    onClick={() => handleViewQuestion(q.id)}
-                    className="flex items-start justify-between p-4 bg-gray-50 rounded-2xl gap-4 cursor-pointer hover:bg-gray-100 transition-colors"
+                {stats?.questionErrorRank.map((q, idx) => (
+                  <div
+                    key={q.id}
+                    onClick={() => handleViewQuestion(q)}
+                    className="flex items-start justify-between p-4 bg-gray-50 rounded-2xl gap-4 cursor-pointer hover:bg-rose-50 hover:border hover:border-rose-200 transition-colors"
                   >
                     <div className="flex items-start gap-3 min-w-0">
                       <span className="w-6 h-6 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-xs font-black mt-0.5">
@@ -576,7 +648,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                       </span>
                       <div className="min-w-0">
                         <p className="font-bold text-gray-700 text-sm leading-snug">{q.label}</p>
-                        <p className="text-xs text-gray-400 mt-0.5">{q.setName} · {q.total} 次作答</p>
+                        <p className="text-xs text-gray-400 mt-0.5">{q.setName} · {q.total} 次作答 · {q.total - q.correct} 人错误</p>
                       </div>
                     </div>
                     <span className="text-rose-600 font-black flex-shrink-0">{q.errorRate}% 错误率</span>
@@ -606,19 +678,26 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                           <button 
                             onClick={() => handleReorder(set.id, 'up')}
                             disabled={index === 0}
-                            className="p-1 hover:bg-gray-100 rounded disabled:opacity-30"
+                            className="p-1 hover:bg-teal-50 text-teal-600 rounded disabled:opacity-30"
+                            title="上移"
                           >
-                            <Plus size={12} className="rotate-180" />
+                            <ChevronUp size={14} />
                           </button>
                           <button 
                             onClick={() => handleReorder(set.id, 'down')}
                             disabled={index === sets.length - 1}
-                            className="p-1 hover:bg-gray-100 rounded disabled:opacity-30"
+                            className="p-1 hover:bg-teal-50 text-teal-600 rounded disabled:opacity-30"
+                            title="下移"
                           >
-                            <Plus size={12} />
+                            <ChevronDown size={14} />
                           </button>
                         </div>
                         <h4 className="font-bold text-gray-900">{set.name}</h4>
+                        {set.timeLimit && (
+                          <span className="text-[10px] bg-blue-50 text-blue-600 font-bold px-2 py-0.5 rounded">
+                            ⏱ {Math.round((set.timeLimit as number) / 60)}分钟
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2">
                         <span className={cn(
@@ -659,6 +738,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                       onClick={() => {
                         setEditingSetId(null);
                         setNewSetName('');
+                        setNewSetTimeLimit(6);
                         setNewQuestions(Array(10).fill(null).map((_, i) => ({
                           id: i + 1,
                           isFree: true,
@@ -717,8 +797,8 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
               )}
 
               <div className="space-y-8">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                  <div className="md:col-span-1">
                     <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Set Name</label>
                     <input 
                       type="text" 
@@ -728,7 +808,19 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                       placeholder="e.g. TOEFL Practice Set 1"
                     />
                   </div>
-                  <div>
+                  <div className="md:col-span-1">
+                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">做题时间（分钟）</label>
+                    <input 
+                      type="number" 
+                      min="1"
+                      max="120"
+                      value={newSetTimeLimit}
+                      onChange={e => setNewSetTimeLimit(Number(e.target.value))}
+                      className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-teal-500 outline-none"
+                      placeholder="6"
+                    />
+                  </div>
+                  <div className="md:col-span-1">
                     <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Access Type</label>
                     <div className="flex gap-4">
                       <button 
@@ -747,7 +839,7 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                           !isFree ? "bg-orange-50 border-orange-500 text-orange-700" : "bg-white border-gray-200 text-gray-500"
                         )}
                       >
-                        Pro (Locked)
+                        Pro
                       </button>
                     </div>
                   </div>
@@ -758,6 +850,25 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                     <div key={idx} className="p-6 bg-gray-50 rounded-2xl border border-gray-200">
                       <div className="flex items-center justify-between mb-6">
                         <div className="flex items-center gap-3">
+                          {/* 排序箭头 */}
+                          <div className="flex flex-col gap-0.5">
+                            <button 
+                              onClick={() => handleQuestionReorder(idx, 'up')}
+                              disabled={idx === 0}
+                              className="p-1 hover:bg-gray-200 rounded disabled:opacity-20"
+                              title="上移"
+                            >
+                              <ChevronUp size={14} />
+                            </button>
+                            <button 
+                              onClick={() => handleQuestionReorder(idx, 'down')}
+                              disabled={idx === newQuestions.length - 1}
+                              className="p-1 hover:bg-gray-200 rounded disabled:opacity-20"
+                              title="下移"
+                            >
+                              <ChevronDown size={14} />
+                            </button>
+                          </div>
                           <span className="w-8 h-8 bg-gray-900 text-white rounded-lg flex items-center justify-center font-bold text-sm">
                             {idx + 1}
                           </span>
@@ -996,25 +1107,31 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
               </button>
             </div>
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-              {activationCodes.map(c => (
-                <div key={c.id} className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex justify-between items-center">
-                  <div className="flex flex-col">
-                    <code className="font-mono font-black text-teal-700">{c.code}</code>
-                    {c.usedBy && <span className="text-[10px] text-gray-400">Used by: {c.usedBy.slice(0, 8)}...</span>}
+              {activationCodes.map(c => {
+                // 兼容旧数据：优先用 used 字段，其次用 status 字段
+                const isUsed = c.used === true || c.status === 'used';
+                return (
+                  <div key={c.id} className="p-4 bg-gray-50 rounded-2xl border border-gray-100 flex justify-between items-center">
+                    <div className="flex flex-col">
+                      <code className="font-mono font-black text-teal-700">{c.code}</code>
+                      {c.usedBy && c.usedBy !== 'pending' && (
+                        <span className="text-[10px] text-gray-400">Used by: {String(c.usedBy).slice(0, 8)}...</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={cn("text-[10px] font-bold px-2 py-1 rounded-lg uppercase", isUsed ? "bg-gray-200 text-gray-500" : "bg-green-100 text-green-700")}>
+                        {isUsed ? '已使用' : '未使用'}
+                      </span>
+                      <button 
+                        onClick={() => deleteCode(c.id)}
+                        className="p-1 text-gray-300 hover:text-rose-500 transition-colors"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className={cn("text-[10px] font-bold px-2 py-1 rounded-lg uppercase", c.status === 'unused' ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-500")}>
-                      {c.status === 'unused' ? '未使用' : '已使用'}
-                    </span>
-                    <button 
-                      onClick={() => deleteCode(c.id)}
-                      className="p-1 text-gray-300 hover:text-rose-500 transition-colors"
-                    >
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
@@ -1087,6 +1204,35 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
                       <span key={i} className="px-3 py-1 bg-orange-100 text-orange-700 rounded-lg text-sm font-medium">
                         {word}
                       </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 错误答案统计 */}
+              {selectedQuestion.wrongAnswers && selectedQuestion.wrongAnswers.length > 0 && (
+                <div className="bg-rose-50 p-6 rounded-2xl border border-rose-100">
+                  <div className="flex items-center justify-between mb-4">
+                    <p className="text-xs font-bold text-rose-600 uppercase tracking-wide">📋 学生错误详情</p>
+                    <span className="text-rose-600 font-black text-sm">
+                      {selectedQuestion.wrongCount} 人错误 / {selectedQuestion.total} 人作答
+                    </span>
+                  </div>
+                  {selectedQuestion.correctAnswer && (
+                    <div className="mb-4 px-3 py-2 bg-green-100 rounded-xl flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-green-700 uppercase flex-shrink-0">正确答案</span>
+                      <span className="text-sm font-mono font-bold text-green-800">{selectedQuestion.correctAnswer}</span>
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    {selectedQuestion.wrongAnswers.map((w, idx) => (
+                      <div key={idx} className="flex items-center gap-3 bg-white rounded-xl px-4 py-2.5 shadow-sm">
+                        <span className="w-5 h-5 flex-shrink-0 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center text-[10px] font-black">
+                          {idx + 1}
+                        </span>
+                        <span className="text-xs font-medium text-gray-500 w-40 flex-shrink-0 truncate">{w.names}</span>
+                        <span className="text-sm font-mono text-rose-600 bg-rose-50 px-2 py-0.5 rounded-lg">{w.answer}</span>
+                      </div>
                     ))}
                   </div>
                 </div>
