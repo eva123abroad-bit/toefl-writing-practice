@@ -533,7 +533,7 @@ function App() {
       setScore(0);
       setIsFinished(false);
       setResults([]);
-      setTimeLeft(360);
+      setTimeLeft(setData.timeLimit || 360);
       setTimerActive(true);
       if (setData.questions && setData.questions.length > 0) {
         initQuestion(setData.questions[0]);
