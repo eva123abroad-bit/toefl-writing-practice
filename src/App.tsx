@@ -257,6 +257,7 @@ function App() {
   const [timeLeft, setTimeLeft] = useState<number>(360);
   const [timerActive, setTimerActive] = useState(false);
   const [timeTaken, setTimeTaken] = useState<number>(0);
+  const [isOverTime, setIsOverTime] = useState(false);
   const [results, setResults] = useState<{ isCorrect: boolean, userAnswer: string[], correctAnswer: string[] }[]>([]);
   // 存储每道题的用户答案（用于返回上一题）
   const [answerHistory, setAnswerHistory] = useState<(string | null)[][]>([]);
@@ -264,15 +265,16 @@ function App() {
   // Timer Effect
   useEffect(() => {
     let interval: NodeJS.Timeout;
-    if (timerActive && timeLeft > 0 && !isFinished) {
+    if (timerActive && !isFinished) {
       interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
+        setTimeLeft((prev) => {
+          if (prev === 1) setIsOverTime(true); // 刚好到0时标记超时
+          return prev - 1;
+        });
       }, 1000);
-    } else if (timeLeft === 0 && !isFinished) {
-      finishQuiz();
     }
     return () => clearInterval(interval);
-  }, [timerActive, timeLeft, isFinished]);
+  }, [timerActive, isFinished]);
 
   const isQuestionLocked = (question: Question) => {
     if (question?.isFree) return false;
@@ -533,6 +535,7 @@ function App() {
       setScore(0);
       setIsFinished(false);
       setResults([]);
+      setIsOverTime(false);
       setTimeLeft(setData.timeLimit || 360);
       setTimerActive(true);
       if (setData.questions && setData.questions.length > 0) {
@@ -997,8 +1000,14 @@ function App() {
                           <ArrowLeft size={18} /> Prev
                         </button>
                         <div className="bg-white px-4 py-2 rounded-xl shadow-sm border border-gray-100 flex items-center gap-2">
-                          <Timer size={18} className="text-teal-600" />
-                          <span className={cn("font-mono font-bold", timeLeft < 30 ? "text-red-600 animate-pulse" : "text-gray-700")}>{formatTime(timeLeft)}</span>
+                          <Timer size={18} className={isOverTime ? "text-red-500" : "text-teal-600"} />
+                          {isOverTime ? (
+                            <span className="font-mono font-bold text-red-500 animate-pulse">
+                              超时 {formatTime(-timeLeft)}
+                            </span>
+                          ) : (
+                            <span className={cn("font-mono font-bold", timeLeft < 30 ? "text-red-600 animate-pulse" : "text-gray-700")}>{formatTime(timeLeft)}</span>
+                          )}
                         </div>
                         <button onClick={nextQuestion} className="px-6 py-2 rounded-xl font-bold transition-all flex items-center gap-2 bg-teal-600 text-white hover:bg-teal-700 shadow-md">{currentIndex < questions.length - 1 ? "Next" : "Finish"}<ChevronRight size={18} /></button>
                       </div>
