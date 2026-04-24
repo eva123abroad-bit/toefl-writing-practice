@@ -73,6 +73,7 @@ import { Question, QuestionSet, User as UserType } from './types';
 import { cn } from './components/lib/utils';
 import AdminDashboard from './components/AdminDashboard';
 import StudentDashboard from './components/StudentDashboard';
+import { Analytics } from '@vercel/analytics/react';
 
 // --- Error Handling ---
 
@@ -126,6 +127,7 @@ export default function Main() {
   return (
     <ErrorBoundary>
       <App />
+      <Analytics />
     </ErrorBoundary>
   );
 }
