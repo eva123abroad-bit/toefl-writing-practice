@@ -121,7 +121,14 @@ export interface ErrorAnalysis {
   category?: PrimaryCategory; errorType?: ErrorType;
   keyPoints?: string[]; difficulty?: number;
   userAnswer: string[]; correctAnswer: string[];
+  template?: string; // 句子模板，用于生成完整句子
   analysis: string; hint?: string; ruleHint?: string;
+}
+
+/** 将 template + words 合成完整句子 */
+export function fillTemplate(template: string | undefined, words: string[]): string {
+  if (!template) return words.join(' ');
+  return template.replace(/\{(\d+)\}/g, (_, idx) => words[parseInt(idx)] || '___');
 }
 export interface ErrorPattern {
   type: string; count: number; percentage: number; questionIndices: number[];
@@ -257,14 +264,14 @@ export function analyzeSingleError(
 /** 分析整套题的错因模式 */
 export function analyzeQuizResults(
   results: { isCorrect: boolean; userAnswer: string[]; correctAnswer: string[] }[],
-  questions: { words: string[]; primaryCategory?: PrimaryCategory; keyPoints?: string[]; difficulty?: number; hint?: string; targetErrorType?: ErrorType; ruleHint?: string; errorPredictions?: { wrongWord: string; replaces: string; errorType: string; hint: string }[] }[]
+  questions: { words: string[]; template?: string; primaryCategory?: PrimaryCategory; keyPoints?: string[]; difficulty?: number; hint?: string; targetErrorType?: ErrorType; ruleHint?: string; errorPredictions?: { wrongWord: string; replaces: string; errorType: string; hint: string }[] }[]
 ): OverallAnalysis {
   const errors: ErrorAnalysis[] = [];
   const typeCount: Record<string, number> = {};
   let totalErrors = 0;
   results.forEach((result, idx) => {
     if (result.isCorrect) {
-      errors.push({ questionIndex: idx, isCorrect: true, userAnswer: result.userAnswer, correctAnswer: result.correctAnswer, analysis: '' });
+      errors.push({ questionIndex: idx, isCorrect: true, userAnswer: result.userAnswer, correctAnswer: result.correctAnswer, template: questions[idx]?.template, analysis: '' });
     } else {
       totalErrors++;
       const q = questions[idx] || {};
@@ -274,6 +281,7 @@ export function analyzeQuizResults(
         q.targetErrorType, q.ruleHint, q.errorPredictions
       );
       analysis.questionIndex = idx;
+      analysis.template = q.template;
       // 统计类型：优先用新分类
       const type = analysis.category || q.primaryCategory || q.targetErrorType || 'A3';
       typeCount[type] = (typeCount[type] || 0) + 1;

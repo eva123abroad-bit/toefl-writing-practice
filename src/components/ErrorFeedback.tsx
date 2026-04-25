@@ -8,6 +8,7 @@ import {
   getCategoryLabel,
   getCategoryColors,
   getCategoryTips,
+  fillTemplate,
 } from '../utils/errorAnalysis';
 
 interface ErrorFeedbackProps {
@@ -323,11 +324,11 @@ export default function ErrorFeedback({ analysis, onStartTargetedPractice, isDia
                     <div className="space-y-2">
                       <div className="text-sm">
                         <span className="text-gray-400 font-bold mr-2">你的答案：</span>
-                        <span className="text-red-600">{error.userAnswer.filter(w => w).join(' ')}</span>
+                        <span className="text-red-600">{fillTemplate(error.template, error.userAnswer.filter(w => w))}</span>
                       </div>
                       <div className="text-sm">
                         <span className="text-gray-400 font-bold mr-2">正确答案：</span>
-                        <span className="text-teal-700 font-bold">{error.correctAnswer.join(' ')}</span>
+                        <span className="text-teal-700 font-bold">{fillTemplate(error.template, error.correctAnswer)}</span>
                       </div>
                     </div>
                   </div>

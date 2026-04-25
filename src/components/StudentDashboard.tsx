@@ -18,7 +18,7 @@ import { cn } from './lib/utils';
 import { practicePool } from '../data/practicePool';
 import { assessmentSet } from '../data/assessmentSet';
 import { seedQuestionSet } from '../data/seedQuestions';
-import { PrimaryCategory, getCategoryLabel, getCategoryColors } from '../utils/errorAnalysis';
+import { PrimaryCategory, getCategoryLabel, getCategoryColors, fillTemplate } from '../utils/errorAnalysis';
 import { RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, ResponsiveContainer } from 'recharts';
 
 interface StudentDashboardProps {
@@ -278,12 +278,26 @@ export default function StudentDashboard({ userId, onBack, onSelectSet }: Studen
                           <div className="space-y-2">
                             <p className="text-gray-600 italic">
                               <span className="font-bold not-italic text-gray-400 mr-2">Your:</span>
-                              "{detail.userAnswer.join(' ')}"
+                              "{(() => {
+                                const q = detail.questionId
+                                  ? practicePool.questions?.find(q => q.id === detail.questionId)
+                                    || assessmentSet.questions?.find(q => q.id === detail.questionId)
+                                    || seedQuestionSet.questions?.find(q => q.id === detail.questionId)
+                                  : undefined;
+                                return fillTemplate(q?.template, detail.userAnswer.filter(Boolean));
+                              })()}"
                             </p>
                             {!detail.isCorrect && (
                               <p className="text-teal-700">
                                 <span className="font-bold text-teal-600/50 mr-2">Correct:</span>
-                                "{detail.correctAnswer.join(' ')}"
+                                "{(() => {
+                                  const q = detail.questionId
+                                    ? practicePool.questions?.find(q => q.id === detail.questionId)
+                                      || assessmentSet.questions?.find(q => q.id === detail.questionId)
+                                      || seedQuestionSet.questions?.find(q => q.id === detail.questionId)
+                                    : undefined;
+                                  return fillTemplate(q?.template, detail.correctAnswer);
+                                })()}"
                               </p>
                             )}
                           </div>
