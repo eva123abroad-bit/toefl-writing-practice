@@ -257,6 +257,8 @@ function App() {
   const [questions, setQuestions] = useState<Question[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [placedWords, setPlacedWords] = useState<(string | null)[]>([]);
+  const [usedWordBankIndices, setUsedWordBankIndices] = useState<Set<number>>(new Set());
+  const [slotToWbIndex, setSlotToWbIndex] = useState<Record<number, number>>({});
   const [score, setScore] = useState(0);
   const [isFinished, setIsFinished] = useState(false);
   const [timeLeft, setTimeLeft] = useState<number>(420);
@@ -626,6 +628,8 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
 
   const initQuestion = (q: Question) => {
     setPlacedWords(new Array(q.correctSentence.length).fill(null));
+    setUsedWordBankIndices(new Set());
+    setSlotToWbIndex({});
   };
 
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -640,10 +644,16 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
     const activeId = active.id as string;
     let word = activeId;
     let fromIndex = -1;
+    let wordBankIndex = -1; // 备选词区的索引，用于区分重复词
 
     if (activeId.startsWith('in-slot-')) {
       const parts = activeId.replace('in-slot-', '').split('-');
       fromIndex = parseInt(parts[0]);
+      word = parts.slice(1).join('-');
+    } else if (activeId.startsWith('wb-')) {
+      // 备选词区：wb-{index}-{word}
+      const parts = activeId.replace('wb-', '').split('-');
+      wordBankIndex = parseInt(parts[0]);
       word = parts.slice(1).join('-');
     }
 
@@ -663,11 +673,21 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
     }
 
     const newPlaced = [...placedWords];
+    const newUsedWb = new Set(usedWordBankIndices);
+    const newSlotToWb = { ...slotToWbIndex };
 
     if (!over) {
+      // 拖到空白区域：如果是从 slot 拖出，放回备选词区
       if (fromIndex !== -1) {
         newPlaced[fromIndex] = null;
+        const prevWbIdx = newSlotToWb[fromIndex];
+        if (prevWbIdx !== undefined) {
+          newUsedWb.delete(prevWbIdx);
+          delete newSlotToWb[fromIndex];
+        }
         setPlacedWords(newPlaced);
+        setUsedWordBankIndices(newUsedWb);
+        setSlotToWbIndex(newSlotToWb);
       }
       return;
     }
@@ -682,18 +702,45 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
     }
 
     if (toIndex !== -1) {
-      if (fromIndex !== -1) {
-        newPlaced[fromIndex] = null;
-      } else {
-        const existingIndex = newPlaced.indexOf(word);
-        if (existingIndex !== -1) newPlaced[existingIndex] = null;
+      // 如果目标位置已有词，先把它放回备选词区
+      if (newPlaced[toIndex] !== null && newPlaced[toIndex] !== undefined) {
+        const existingWbIdx = newSlotToWb[toIndex];
+        if (existingWbIdx !== undefined) {
+          newUsedWb.delete(existingWbIdx);
+          delete newSlotToWb[toIndex];
+        }
       }
+
+      if (fromIndex !== -1) {
+        // 从一个 slot 移到另一个 slot
+        newPlaced[fromIndex] = null;
+        const prevWbIdx = newSlotToWb[fromIndex];
+        if (prevWbIdx !== undefined) {
+          delete newSlotToWb[fromIndex];
+          newSlotToWb[toIndex] = prevWbIdx;
+        }
+      } else if (wordBankIndex !== -1) {
+        // 从备选词区拖入 slot
+        newUsedWb.add(wordBankIndex);
+        newSlotToWb[toIndex] = wordBankIndex;
+      }
+
       newPlaced[toIndex] = word;
       setPlacedWords(newPlaced);
+      setUsedWordBankIndices(newUsedWb);
+      setSlotToWbIndex(newSlotToWb);
     } else {
+      // 拖到非 slot 区域（如备选词区）：把词放回
       if (fromIndex !== -1) {
         newPlaced[fromIndex] = null;
+        const prevWbIdx = newSlotToWb[fromIndex];
+        if (prevWbIdx !== undefined) {
+          newUsedWb.delete(prevWbIdx);
+          delete newSlotToWb[fromIndex];
+        }
         setPlacedWords(newPlaced);
+        setUsedWordBankIndices(newUsedWb);
+        setSlotToWbIndex(newSlotToWb);
       }
     }
   };
@@ -1224,7 +1271,7 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
                       <div className="bg-white rounded-[2.5rem] p-8 shadow-sm border border-gray-100">
                         <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-6 text-center">Drag words to build your response</h3>
                         <div className="flex flex-wrap gap-3 justify-center">
-                          {shuffledWords.map((word) => <DraggableWord key={word} id={word} word={word} isUsed={placedWords.includes(word)} />)}
+                          {shuffledWords.map((word, idx) => <DraggableWord key={`wb-${idx}`} id={`wb-${idx}-${word}`} word={word} isUsed={usedWordBankIndices.has(idx)} />)}
                         </div>
                       </div>
                     </DndContext>
