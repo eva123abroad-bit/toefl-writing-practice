@@ -12,6 +12,7 @@ export interface PersonalizedConfig {
   patterns: ErrorPattern[];
   totalQuestions?: number;
   correctIds?: Set<number>;
+  wrongKeyPoints?: string[][];    // 错题的 keyPoints 列表，用于精准匹配
 }
 
 /**
@@ -29,17 +30,22 @@ function shuffle<T>(arr: T[]): T[] {
 /**
  * 根据错因分布生成个性化练习套题
  * 
- * 组题策略（v4.0 集中突破模式）：
- * - 每个薄弱考点出 3~4 题（depending on difficulty & availability）
- * - 不再混合其他类型，专注突破薄弱环节
+ * 组题策略（v5.0 keyPoints精准匹配）：
+ * - 先按 keyPoints 重叠度精准匹配，重叠度高的优先
+ * - keyPoints 匹配不够时，按 primaryCategory 兜底
  * - 排除已正确题目
  * - 题目数量：薄弱类型数 × 3~4 题
  */
 export function generatePersonalizedSet(config: PersonalizedConfig): QuestionSet {
-  const { weakAreas, patterns, correctIds = new Set() } = config;
+  const { weakAreas, patterns, correctIds = new Set(), wrongKeyPoints = [] } = config;
 
   // 获取练习题池
   const pool = practicePool.questions || [];
+
+  // 收集错题中出现的所有 keyPoint（扁平化）
+  const wrongKPSet = new Set<string>();
+  wrongKeyPoints.forEach(kps => kps.forEach(kp => wrongKPSet.add(kp)));
+  const wrongKPArray = [...wrongKPSet];
 
   // 按考点分组（v3.0：优先用 primaryCategory，兼容旧 targetErrorType）
   const byCategory: Record<string, Question[]> = {};
@@ -65,27 +71,44 @@ export function generatePersonalizedSet(config: PersonalizedConfig): QuestionSet
     (weakPatternMap.get(b) || 0) - (weakPatternMap.get(a) || 0)
   );
 
+  /**
+   * 计算一道题与错题 keyPoints 的重叠度
+   * 返回重叠的 keyPoint 数量
+   */
+  function keyPointOverlap(q: Question): number {
+    if (!q.keyPoints || q.keyPoints.length === 0 || wrongKPArray.length === 0) return 0;
+    return q.keyPoints.filter(kp => wrongKPSet.has(kp)).length;
+  }
+
   const selected: Question[] = [];
   const usedIds = new Set<number>();
 
   // 每个薄弱考点出 3~4 题
   for (const area of sortedWeakAreas) {
-    const candidates = shuffle(byCategory[area] || []).filter(q => !usedIds.has(q.id));
+    const allCandidates = (byCategory[area] || []).filter(q => !usedIds.has(q.id));
     
+    // 按 keyPoints 重叠度排序（高的优先），重叠度为0的排后面
+    const sorted = [...allCandidates].sort((a, b) => {
+      const overlapA = keyPointOverlap(a);
+      const overlapB = keyPointOverlap(b);
+      if (overlapA !== overlapB) return overlapB - overlapA; // 重叠多的优先
+      // 同重叠度：中等难度优先
+      const diffA = Math.abs((a.difficulty || 2) - 2);
+      const diffB = Math.abs((b.difficulty || 2) - 2);
+      return diffA - diffB;
+    });
+
     // 根据难度和可用题目数决定数量
-    // - 如果该考点难度普遍高（difficulty >= 3），出 3 题
-    // - 如果题目充足（>= 4），出 4 题
-    // - 否则尽可能多选
-    const avgDifficulty = candidates.length > 0 
-      ? candidates.reduce((sum, q) => sum + (q.difficulty || 2), 0) / candidates.length 
+    const avgDifficulty = sorted.length > 0 
+      ? sorted.reduce((sum, q) => sum + (q.difficulty || 2), 0) / sorted.length 
       : 2;
-    const questionsPerArea = avgDifficulty >= 3 ? 3 : (candidates.length >= 4 ? 4 : candidates.length);
+    const questionsPerArea = avgDifficulty >= 3 ? 3 : (sorted.length >= 4 ? 4 : sorted.length);
     
-    const toPick = Math.min(questionsPerArea, candidates.length);
+    const toPick = Math.min(questionsPerArea, sorted.length);
     
     for (let i = 0; i < toPick; i++) {
-      selected.push(candidates[i]);
-      usedIds.add(candidates[i].id);
+      selected.push(sorted[i]);
+      usedIds.add(sorted[i].id);
     }
   }
 
@@ -114,11 +137,13 @@ export function generatePersonalizedSet(config: PersonalizedConfig): QuestionSet
  * 策略：
  * - 从5个考点各随机抽4题 = 20题
  * - 难度分布：每考点优先选中等难度题
- * - 每次测试题目不同（从182题题池中随机）
+ * - 排除已做过的题目（excludeIds）
+ * - 如果某考点排除后不够4题，用已做题目兜底
  */
-export function generateDiagnosticSet(): QuestionSet {
+export function generateDiagnosticSet(excludeIds?: Set<number>): QuestionSet {
   const pool = practicePool.questions || [];
   const ALL_CATS: PrimaryCategory[] = ['从句逻辑', '词序排列', '修饰语位置', '谓语架构', '特殊句式'];
+  const excluded = excludeIds || new Set<number>();
   
   // 按考点分组
   const byCategory: Record<string, Question[]> = {};
@@ -132,20 +157,33 @@ export function generateDiagnosticSet(): QuestionSet {
   const selected: Question[] = [];
   const usedIds = new Set<number>();
   
-  // 每个考点选4题
+  // 每个考点选4题（优先排除已做题目）
   for (const cat of ALL_CATS) {
-    const candidates = shuffle(byCategory[cat] || []).filter(q => !usedIds.has(q.id));
-    // 优先选中等难度题（difficulty = 2），然后混合简单和难
-    const sorted = candidates.sort((a, b) => {
-      const diffA = Math.abs((a.difficulty || 2) - 2); // 越接近2越优先
+    const candidates = shuffle(byCategory[cat] || []);
+    // 优先选没做过的题
+    const fresh = candidates.filter(q => !usedIds.has(q.id) && !excluded.has(q.id));
+    // 已做过的题作为兜底
+    const used = candidates.filter(q => !usedIds.has(q.id) && excluded.has(q.id));
+    
+    // 先从 fresh 中按难度排序选取
+    const sortedFresh = [...fresh].sort((a, b) => {
+      const diffA = Math.abs((a.difficulty || 2) - 2);
       const diffB = Math.abs((b.difficulty || 2) - 2);
       return diffA - diffB;
     });
     
-    const toPick = Math.min(4, sorted.length);
+    const sortedUsed = [...used].sort((a, b) => {
+      const diffA = Math.abs((a.difficulty || 2) - 2);
+      const diffB = Math.abs((b.difficulty || 2) - 2);
+      return diffA - diffB;
+    });
+    
+    // 先取 fresh，不够再用 used 兜底
+    const merged = [...sortedFresh, ...sortedUsed];
+    const toPick = Math.min(4, merged.length);
     for (let i = 0; i < toPick; i++) {
-      selected.push(sorted[i]);
-      usedIds.add(sorted[i].id);
+      selected.push(merged[i]);
+      usedIds.add(merged[i].id);
     }
   }
   

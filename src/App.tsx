@@ -289,6 +289,8 @@ function App() {
   const [errorAnalysis, setErrorAnalysis] = useState<OverallAnalysis | null>(null);
   // 正确题目的ID集合（用于提升练习排除）
   const [correctQuestionIds, setCorrectQuestionIds] = useState<Set<number>>(new Set());
+  // 所有已做题目的ID集合（用于诊断去重）
+  const [doneQuestionIds, setDoneQuestionIds] = useState<Set<number>>(new Set());
   // 诊断测试的错因分析（用于个性化练习后的进步对比）
   const [diagnosticAnalysis, setDiagnosticAnalysis] = useState<OverallAnalysis | null>(null);
 
@@ -761,8 +763,15 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
     setErrorAnalysis(analysis);
     // 收集正确题目ID
     const correctIds = new Set<number>();
-    allResults.forEach((r, i) => { if (r.isCorrect && questions[i]) correctIds.add(questions[i].id); });
+    const doneIds = new Set<number>();
+    allResults.forEach((r, i) => {
+      if (questions[i]) {
+        doneIds.add(questions[i].id);
+        if (r.isCorrect) correctIds.add(questions[i].id);
+      }
+    });
     setCorrectQuestionIds(correctIds);
+    setDoneQuestionIds(prev => new Set([...prev, ...doneIds]));
     
     // 先保存结果（游客不填写也保存匿名记录）
     saveResult(duration);
@@ -988,7 +997,7 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
                 <p className="text-gray-500 text-xl max-w-2xl mx-auto">Interactive sentence building practice designed to help you ace the TOEFL exam.</p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <motion.div whileHover={{ y: -10 }} onClick={() => startSet(generateDiagnosticSet())} className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-gray-100 hover:shadow-xl hover:shadow-teal-600/5 transition-all cursor-pointer group">
+                <motion.div whileHover={{ y: -10 }} onClick={() => startSet(generateDiagnosticSet(doneQuestionIds))} className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-gray-100 hover:shadow-xl hover:shadow-teal-600/5 transition-all cursor-pointer group">
                   <div className="w-16 h-16 bg-teal-50 text-teal-600 rounded-2xl flex items-center justify-center mb-6 group-hover:scale-110 transition-transform"><Sparkles size={32} /></div>
                   <h3 className="text-2xl font-black text-gray-900 mb-2">能力诊断测试</h3>
                   <p className="text-gray-500 mb-6">20道精选题，全面检测英语造句能力，获取个性化学习建议。</p>
@@ -1143,7 +1152,7 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
                   {availableSets.some(s => s?.id === 'assessment-diagnostic') && filterType === 'free' && (
                     <motion.div
                       whileHover={{ y: -8 }}
-                      onClick={() => startSet(generateDiagnosticSet())}
+                      onClick={() => startSet(generateDiagnosticSet(doneQuestionIds))}
                       className="mb-8 bg-gradient-to-br from-teal-500 via-teal-600 to-emerald-600 rounded-[2.5rem] p-8 shadow-xl hover:shadow-2xl hover:shadow-teal-600/20 transition-all cursor-pointer text-white overflow-hidden relative"
                     >
                       <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2" />
@@ -1374,6 +1383,9 @@ console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
                               weakAreas: errorAnalysis.weakAreas,
                               patterns: errorAnalysis.patterns,
                               correctIds: correctQuestionIds,
+                              wrongKeyPoints: errorAnalysis.errors
+                                .filter(e => !e.isCorrect && e.keyPoints)
+                                .map(e => e.keyPoints || []),
                             });
                             startSet(personalized);
                           } else {
