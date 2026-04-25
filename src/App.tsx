@@ -68,11 +68,16 @@ import {
   serverTimestamp,
   Timestamp
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, handleFirestoreError, OperationType, isFirebaseReady } from './firebase';
 import { Question, QuestionSet, User as UserType } from './types';
 import { cn } from './components/lib/utils';
 import AdminDashboard from './components/AdminDashboard';
 import StudentDashboard from './components/StudentDashboard';
+import ErrorFeedback from './components/ErrorFeedback';
+import TargetedPractice from './components/TargetedPractice';
+import { analyzeQuizResults, OverallAnalysis } from './utils/errorAnalysis';
+import { assessmentSet } from './data/seedQuestions';
+import { generatePersonalizedSet, generateDiagnosticSet } from './utils/personalizedSet';
 
 // --- Error Handling ---
 
@@ -226,7 +231,7 @@ const DroppableZone = ({
 
 // --- Main App ---
 
-type View = 'landing' | 'login' | 'home' | 'quiz' | 'admin' | 'student-dashboard';
+type View = 'landing' | 'login' | 'home' | 'quiz' | 'admin' | 'student-dashboard' | 'targeted-practice';
 
 function App() {
   const [view, setView] = useState<View>('landing');
@@ -254,13 +259,36 @@ function App() {
   const [placedWords, setPlacedWords] = useState<(string | null)[]>([]);
   const [score, setScore] = useState(0);
   const [isFinished, setIsFinished] = useState(false);
-  const [timeLeft, setTimeLeft] = useState<number>(360);
+  const [timeLeft, setTimeLeft] = useState<number>(420);
   const [timerActive, setTimerActive] = useState(false);
   const [timeTaken, setTimeTaken] = useState<number>(0);
   const [isOverTime, setIsOverTime] = useState(false);
-  const [results, setResults] = useState<{ isCorrect: boolean, userAnswer: string[], correctAnswer: string[] }[]>([]);
+  const [results, setResults] = useState<{ questionId?: number, isCorrect: boolean, userAnswer: string[], correctAnswer: string[] }[]>([]);
   // 存储每道题的用户答案（用于返回上一题）
   const [answerHistory, setAnswerHistory] = useState<(string | null)[][]>([]);
+  // === Trace 行为追踪 ===
+  const [questionStartTime, setQuestionStartTime] = useState<number>(Date.now());
+  const [questionModifications, setQuestionModifications] = useState<Record<number, number>>({});
+  const [questionFirstAnswerTime, setQuestionFirstAnswerTime] = useState<Record<number, string>>({});
+  // 存储每题用时（用于返回上一题时不丢失已计时数据）
+  const [questionTimeSpent, setQuestionTimeSpent] = useState<Record<number, number>>({});
+  // 打乱当前题目的备选词（每次切换题目时重新打乱）
+  const shuffledWords = useMemo(() => {
+    const words = questions[currentIndex]?.words || [];
+    const arr = [...words];
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }, [currentIndex, questions]);
+
+  // 错因分析
+  const [errorAnalysis, setErrorAnalysis] = useState<OverallAnalysis | null>(null);
+  // 正确题目的ID集合（用于提升练习排除）
+  const [correctQuestionIds, setCorrectQuestionIds] = useState<Set<number>>(new Set());
+  // 诊断测试的错因分析（用于个性化练习后的进步对比）
+  const [diagnosticAnalysis, setDiagnosticAnalysis] = useState<OverallAnalysis | null>(null);
 
   // Timer Effect
   useEffect(() => {
@@ -290,13 +318,21 @@ function App() {
   };
 
   const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs.toString().padStart(2, '0')}`;
+    const abs = Math.abs(seconds);
+    const mins = Math.floor(abs / 60);
+    const secs = abs % 60;
+    const prefix = seconds < 0 ? '-' : '';
+    return `${prefix}${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   // Auth Effect
   useEffect(() => {
+    // Firebase 未配置时跳过认证
+    if (!isFirebaseReady || !auth || !db) {
+      console.log('[Auth] Firebase 未配置，跳过认证');
+      setAuthLoading(false);
+      return;
+    }
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       setAuthLoading(true);
       if (firebaseUser) {
@@ -345,15 +381,29 @@ function App() {
 
   const fetchSets = async () => {
     setLoadingSets(true);
+    // Firebase 未配置时直接使用诊断题组
+    if (!isFirebaseReady || !db) {
+      console.log('[Seed] Firebase 未配置，使用本地诊断题组');
+      setAvailableSets([assessmentSet]);
+      setLoadingSets(false);
+      return;
+    }
     try {
       const questionsSnapshot = await getDocs(collection(db, 'questions'));
       const data = questionsSnapshot.docs.map(doc => ({
         id: doc.id,
         ...doc.data()
       })) as QuestionSet[];
-      setAvailableSets(data);
+// 如果 Firestore 为空，使用本地诊断题组
+        if (data.length === 0) {
+          console.log('[Seed] Firestore 无数据，使用本地诊断题组');
+          setAvailableSets([assessmentSet]);
+        } else {
+          setAvailableSets([assessmentSet, ...data]);
+        }
     } catch (error) {
-      handleFirestoreError(error, OperationType.LIST, 'questions');
+console.warn('[Seed] Firestore 读取失败，使用本地诊断题组', error);
+        setAvailableSets([assessmentSet]);
     } finally {
       setLoadingSets(false);
     }
@@ -378,6 +428,12 @@ function App() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Firebase 未配置时提示
+    if (!isFirebaseReady || !auth) {
+      alert('Firebase 未配置，无法登录。请配置 .env 文件或直接使用本地种子数据练习。');
+      setView('home');
+      return;
+    }
     console.log('开始登录请求...', phone);
     setLoginError('');
     setLoading(true);
@@ -397,6 +453,12 @@ function App() {
 
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
+    // Firebase 未配置时提示
+    if (!isFirebaseReady || !auth || !db) {
+      alert('Firebase 未配置，无法注册。请配置 .env 文件或直接使用本地种子数据练习。');
+      setView('home');
+      return;
+    }
     console.log('开始注册请求...', phone, activationCode, intendedMode);
     setLoginError('');
     setLoading(true);
@@ -486,13 +548,22 @@ function App() {
   };
 
   const handleLogout = async () => {
-    await signOut(auth);
+    if (isFirebaseReady && auth) {
+      await signOut(auth);
+    }
     setUser(null);
     setView('landing');
   };
 
   const startSet = async (set: QuestionSet) => {
     if (!set) return;
+    
+    // 诊断测试必须登录
+    if (set?.id === 'assessment-diagnostic' && !user) {
+      setIntendedMode('free');
+      setView('login');
+      return;
+    }
     
     if (set?.isFree === false && !user) {
       setPendingSet(set);
@@ -535,9 +606,15 @@ function App() {
       setScore(0);
       setIsFinished(false);
       setResults([]);
+      setAnswerHistory([]); // 清空历史答案，防止上一题组答案残留
       setIsOverTime(false);
-      setTimeLeft(setData.timeLimit || 360);
+      setTimeLeft(setData.timeLimit || 420);
       setTimerActive(true);
+      // 重置 Trace 追踪状态
+      setQuestionStartTime(Date.now());
+      setQuestionModifications({});
+      setQuestionFirstAnswerTime({});
+      setQuestionTimeSpent({});
       if (setData.questions && setData.questions.length > 0) {
         initQuestion(setData.questions[0]);
       }
@@ -568,6 +645,21 @@ function App() {
       const parts = activeId.replace('in-slot-', '').split('-');
       fromIndex = parseInt(parts[0]);
       word = parts.slice(1).join('-');
+    }
+
+    // Trace: 记录修改次数（每次拖拽到有效位置时 +1）
+    if (over) {
+      setQuestionModifications(prev => ({
+        ...prev,
+        [currentIndex]: (prev[currentIndex] || 0) + 1
+      }));
+      // Trace: 记录首次作答时间
+      if (!questionFirstAnswerTime[currentIndex]) {
+        setQuestionFirstAnswerTime(prev => ({
+          ...prev,
+          [currentIndex]: new Date().toISOString()
+        }));
+      }
     }
 
     const newPlaced = [...placedWords];
@@ -612,6 +704,19 @@ function App() {
     const duration = 360 - timeLeft;
     setTimeTaken(duration);
     
+    // 运行错因分析
+    const allResults = [...results, {
+      isCorrect: JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence),
+      userAnswer: placedWords.map(w => w || ""),
+      correctAnswer: questions[currentIndex].correctSentence || []
+    }];
+    const analysis = analyzeQuizResults(allResults, questions);
+    setErrorAnalysis(analysis);
+    // 收集正确题目ID
+    const correctIds = new Set<number>();
+    allResults.forEach((r, i) => { if (r.isCorrect && questions[i]) correctIds.add(questions[i].id); });
+    setCorrectQuestionIds(correctIds);
+    
     // 先保存结果（游客不填写也保存匿名记录）
     saveResult(duration);
     
@@ -631,12 +736,20 @@ function App() {
     const currentQ = questions[currentIndex];
     const isCorrect = JSON.stringify(placedWords) === JSON.stringify(currentQ.correctSentence);
 
+    // Trace: 记录当前题用时（秒）
+    const timeSpentOnCurrent = Math.floor((Date.now() - questionStartTime) / 1000);
+    setQuestionTimeSpent(prev => ({
+      ...prev,
+      [currentIndex]: (prev[currentIndex] || 0) + timeSpentOnCurrent
+    }));
+
     const newHistory = [...answerHistory];
     newHistory[currentIndex] = [...placedWords];
     setAnswerHistory(newHistory);
 
     const newResults = [...results];
     newResults[currentIndex] = {
+      questionId: currentQ.id,
       isCorrect,
       userAnswer: placedWords.map(w => w || ""),
       correctAnswer: currentQ.correctSentence || []
@@ -647,6 +760,8 @@ function App() {
     if (currentIndex < questions.length - 1) {
       const nextIdx = currentIndex + 1;
       setCurrentIndex(nextIdx);
+      // Trace: 重置下一题计时起点
+      setQuestionStartTime(Date.now());
       if (newHistory[nextIdx]) {
         setPlacedWords([...newHistory[nextIdx]]);
       } else {
@@ -660,12 +775,21 @@ function App() {
   const prevQuestion = () => {
     if (currentIndex === 0) return;
 
+    // Trace: 记录当前题用时（返回上一题时暂停计时）
+    const timeSpentOnCurrent = Math.floor((Date.now() - questionStartTime) / 1000);
+    setQuestionTimeSpent(prev => ({
+      ...prev,
+      [currentIndex]: (prev[currentIndex] || 0) + timeSpentOnCurrent
+    }));
+
     const newHistory = [...answerHistory];
     newHistory[currentIndex] = [...placedWords];
     setAnswerHistory(newHistory);
 
     const prevIdx = currentIndex - 1;
     setCurrentIndex(prevIdx);
+    // Trace: 重置计时起点（返回时从 0 重新开始计上一题的追加时间）
+    setQuestionStartTime(Date.now());
 
     if (newHistory[prevIdx]) {
       setPlacedWords([...newHistory[prevIdx]]);
@@ -679,6 +803,7 @@ function App() {
         const q = questions[i];
         const isCorrect = JSON.stringify(savedAnswer) === JSON.stringify(q.correctSentence);
         return {
+          questionId: q.id,
           isCorrect,
           userAnswer: savedAnswer.map(w => w || ""),
           correctAnswer: q.correctSentence || []
@@ -690,10 +815,40 @@ function App() {
 
   const saveResult = async (duration: number) => {
     if (!currentSet) return;
+    // Firebase 未配置时跳过保存
+    if (!isFirebaseReady || !db) {
+      console.log('[Result] Firebase 未配置，跳过结果保存');
+      return;
+    }
     try {
       const finalScore = Math.round(((score + (JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence) ? 1 : 0)) / questions.length) * 100);
       const finalCorrectCount = score + (JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence) ? 1 : 0);
       
+      // 将错因分析合并到 details
+      const finalDetails = [...results, {
+        questionId: questions[currentIndex]?.id ?? currentIndex,
+        isCorrect: JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence),
+        userAnswer: placedWords.map(w => w || ""),
+        correctAnswer: questions[currentIndex].correctSentence
+      }].map((d, i) => ({
+        ...d,
+        analysis: errorAnalysis?.errors?.[i]?.analysis,
+        ruleHint: errorAnalysis?.errors?.[i]?.ruleHint,
+        hint: errorAnalysis?.errors?.[i]?.hint,
+        // === 诊断结果持久化 ===
+        diagnosis: errorAnalysis?.errors?.[i] && !errorAnalysis?.errors?.[i]?.isCorrect ? {
+          category: errorAnalysis.errors[i].category,
+          errorType: errorAnalysis.errors[i].errorType,
+          keyPoints: errorAnalysis.errors[i].keyPoints,
+          difficulty: errorAnalysis.errors[i].difficulty,
+        } : null,
+        // === Trace 行为追踪数据 ===
+        timeSpent: questionTimeSpent[i] || 0,
+        modifications: questionModifications[i] || 0,
+        firstAnswerTime: questionFirstAnswerTime[i] || null,
+        submitTime: i === questions.length - 1 ? new Date().toISOString() : null
+      }));
+
       const resultData = {
         userId: user ? user.id : 'guest',
         userName: user ? (user.name || user.phone || user.username || 'Anonymous') : (guestContact || '匿名游客'),
@@ -706,12 +861,7 @@ function App() {
         timeSpent: duration,
         timestamp: Timestamp.now(),
         completedAt: Timestamp.now(),
-        details: [...results, {
-          questionId: questions[currentIndex]?.id ?? currentIndex,
-          isCorrect: JSON.stringify(placedWords) === JSON.stringify(questions[currentIndex].correctSentence),
-          userAnswer: placedWords.map(w => w || ""),
-          correctAnswer: questions[currentIndex].correctSentence
-        }]
+        details: finalDetails
       };
       await addDoc(collection(db, 'results'), resultData);
     } catch (error) {
@@ -791,13 +941,10 @@ function App() {
                 <p className="text-gray-500 text-xl max-w-2xl mx-auto">Interactive sentence building practice designed to help you ace the TOEFL exam.</p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                <motion.div whileHover={{ y: -10 }} onClick={() => { 
-                  setFilterType('free'); 
-                  setView('home'); 
-                }} className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-gray-100 hover:shadow-xl hover:shadow-teal-600/5 transition-all cursor-pointer group">
+                <motion.div whileHover={{ y: -10 }} onClick={() => startSet(generateDiagnosticSet())} className="bg-white p-8 rounded-[2.5rem] shadow-sm border border-gray-100 hover:shadow-xl hover:shadow-teal-600/5 transition-all cursor-pointer group">
                   <div className="w-16 h-16 bg-teal-50 text-teal-600 rounded-2xl flex items-center justify-center mb-6 group-hover:scale-110 transition-transform"><Sparkles size={32} /></div>
-                  <h3 className="text-2xl font-black text-gray-900 mb-2">公开挑战</h3>
-                  <p className="text-gray-500 mb-6">无需登录，立即开始免费练习，体验核心造句交互。</p>
+                  <h3 className="text-2xl font-black text-gray-900 mb-2">能力诊断测试</h3>
+                  <p className="text-gray-500 mb-6">20道精选题，全面检测英语造句能力，获取个性化学习建议。</p>
                   <div className="flex items-center gap-2 font-bold text-teal-600">立即开始 <ArrowRight size={18} /></div>
                 </motion.div>
                 <motion.div whileHover={{ y: -10 }} onClick={() => { 
@@ -905,6 +1052,11 @@ function App() {
                 </form>
 
                 <div className="mt-8 pt-8 border-t border-gray-100 text-center">
+                  <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-6">
+                    <p className="text-amber-800 text-sm font-medium">
+                      还没有账号？联系 Eva 老师（微信 <span className="font-black">eve-180</span>）获取权限
+                    </p>
+                  </div>
                   <p className="text-gray-500 text-sm mb-4">{isRegistering ? '已经有账号了？' : '还没有账号？'}</p>
                   <button
                     onClick={() => {
@@ -932,43 +1084,75 @@ function App() {
               <div className="flex items-center gap-4 mb-8">
                 <button onClick={() => setView('landing')} className="p-2 hover:bg-gray-100 rounded-full transition-colors"><ArrowLeft size={24} /></button>
                 <div>
-                  <h2 className="text-3xl font-black text-gray-900">{filterType === 'free' ? '公开挑战' : '写作团'}</h2>
+                  <h2 className="text-3xl font-black text-gray-900">{filterType === 'free' ? '能力诊断测试' : '写作团'}</h2>
                   <p className="text-gray-500 font-medium">Select a practice set to begin</p>
                 </div>
               </div>
               {loadingSets ? (
                 <div className="p-20 text-center font-bold text-teal-600 text-xl">正在加载题库，请稍候...</div>
               ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-                  {availableSets
-                    .filter(set => {
-                      if (!set) return false;
-                      return filterType === 'all' || (filterType === 'free' ? set.isFree : !set.isFree);
-                    })
-                    .map((set) => {
-                      if (!set) return null;
-                      const isExpired = user?.role === 'student' && new Date() > new Date(user.expiresAt);
-                      const isLocked = !set.isFree && (isExpired || !isSubscribed) && user?.role !== 'admin';
-                      return (
-                        <motion.div key={set.id} whileHover={{ y: -8 }} className="group relative bg-white rounded-[2.5rem] p-8 shadow-sm border border-gray-100 hover:shadow-xl hover:shadow-teal-600/5 transition-all cursor-pointer overflow-hidden" onClick={() => startSet(set)}>
-                          <div className="relative z-10">
-                            <div className="flex justify-between items-start mb-6">
-                              <div className={cn("w-14 h-14 rounded-2xl flex items-center justify-center shadow-inner", set.isFree ? "bg-teal-50 text-teal-600" : "bg-orange-50 text-orange-600")}>
-                                {set.isFree ? <BookOpen size={28} /> : <Sparkles size={28} />}
-                              </div>
-                              {isLocked && <div className="bg-orange-100 text-orange-600 p-2 rounded-xl"><Lock size={18} /></div>}
-                            </div>
-                            <h3 className="text-2xl font-black text-gray-900 mb-2 group-hover:text-teal-600 transition-colors">{set.name}</h3>
-                            <p className="text-gray-400 text-sm font-medium mb-8">{set.questionCount} Questions • {set.isFree ? 'Free Access' : 'Pro Content'}</p>
-                            <div className="flex items-center justify-between">
-                              <span className={cn("text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider", set.isFree ? "bg-teal-50 text-teal-700" : "bg-orange-50 text-orange-700")}>{set.isFree ? 'Free' : 'Pro'}</span>
-                              <div className="flex items-center gap-2 font-bold text-teal-600 group-hover:translate-x-1 transition-transform">{isLocked ? (isExpired ? 'Account Expired' : 'Unlock Now') : 'Start Practice'} <ArrowRight size={18} /></div>
-                            </div>
+                <>
+                  {/* 诊断测试特殊卡片 - 显示在最前面 */}
+                  {availableSets.some(s => s?.id === 'assessment-diagnostic') && filterType === 'free' && (
+                    <motion.div
+                      whileHover={{ y: -8 }}
+                      onClick={() => startSet(generateDiagnosticSet())}
+                      className="mb-8 bg-gradient-to-br from-teal-500 via-teal-600 to-emerald-600 rounded-[2.5rem] p-8 shadow-xl hover:shadow-2xl hover:shadow-teal-600/20 transition-all cursor-pointer text-white overflow-hidden relative"
+                    >
+                      <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2" />
+                      <div className="relative z-10">
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="w-14 h-14 bg-white/20 rounded-2xl flex items-center justify-center shadow-lg">
+                            <GraduationCap size={28} />
                           </div>
-                        </motion.div>
-                      );
-                    })}
-                </div>
+                          <span className="px-3 py-1 bg-white/20 rounded-full text-xs font-bold uppercase tracking-wider">推荐首测</span>
+                        </div>
+                        <h3 className="text-2xl font-black mb-2">能力诊断测试</h3>
+                        <p className="text-teal-100 mb-6 leading-relaxed">20道精选题目，全面检测你的英语造句能力。完成后获得个性化学习建议和针对性练习推荐。</p>
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-teal-100">约 14 分钟</span>
+                          <div className="flex items-center gap-2 font-bold text-white">
+                            开始诊断 <ArrowRight size={18} />
+                          </div>
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+
+                  {/* 普通题库列表 */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    {availableSets
+                      .filter(set => {
+                        if (!set) return false;
+                        // 诊断测试已在上方单独展示，这里不重复显示
+                        if (set.id === 'assessment-diagnostic') return false;
+                        return filterType === 'all' || (filterType === 'free' ? set.isFree : !set.isFree);
+                      })
+                      .map((set) => {
+                        if (!set) return null;
+                        const isExpired = user?.role === 'student' && new Date() > new Date(user.expiresAt);
+                        const isLocked = !set.isFree && (isExpired || !isSubscribed) && user?.role !== 'admin';
+                        return (
+                          <motion.div key={set.id} whileHover={{ y: -8 }} className="group relative bg-white rounded-[2.5rem] p-8 shadow-sm border border-gray-100 hover:shadow-xl hover:shadow-teal-600/5 transition-all cursor-pointer overflow-hidden" onClick={() => startSet(set)}>
+                            <div className="relative z-10">
+                              <div className="flex justify-between items-start mb-6">
+                                <div className={cn("w-14 h-14 rounded-2xl flex items-center justify-center shadow-inner", set.isFree ? "bg-teal-50 text-teal-600" : "bg-orange-50 text-orange-600")}>
+                                  {set.isFree ? <BookOpen size={28} /> : <Sparkles size={28} />}
+                                </div>
+                                {isLocked && <div className="bg-orange-100 text-orange-600 p-2 rounded-xl"><Lock size={18} /></div>}
+                              </div>
+                              <h3 className="text-2xl font-black text-gray-900 mb-2 group-hover:text-teal-600 transition-colors">{set.name}</h3>
+                              <p className="text-gray-400 text-sm font-medium mb-8">{set.questionCount} Questions • {set.isFree ? 'Free Access' : 'Pro Content'}</p>
+                              <div className="flex items-center justify-between">
+                                <span className={cn("text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider", set.isFree ? "bg-teal-50 text-teal-700" : "bg-orange-50 text-orange-700")}>{set.isFree ? 'Free' : 'Pro'}</span>
+                                <div className="flex items-center gap-2 font-bold text-teal-600 group-hover:translate-x-1 transition-transform">{isLocked ? (isExpired ? 'Account Expired' : 'Unlock Now') : 'Start Practice'} <ArrowRight size={18} /></div>
+                              </div>
+                            </div>
+                          </motion.div>
+                        );
+                      })}
+                  </div>
+                </>
               )}
             </motion.div>
           )}
@@ -1040,7 +1224,7 @@ function App() {
                       <div className="bg-white rounded-[2.5rem] p-8 shadow-sm border border-gray-100">
                         <h3 className="text-xs font-bold text-gray-400 uppercase tracking-widest mb-6 text-center">Drag words to build your response</h3>
                         <div className="flex flex-wrap gap-3 justify-center">
-                          {questions[currentIndex].words.map((word) => <DraggableWord key={word} id={word} word={word} isUsed={placedWords.includes(word)} />)}
+                          {shuffledWords.map((word) => <DraggableWord key={word} id={word} word={word} isUsed={placedWords.includes(word)} />)}
                         </div>
                       </div>
                     </DndContext>
@@ -1060,40 +1244,7 @@ function App() {
                   )}
                 </div>
               ) : (
-                <div className="bg-white rounded-[3rem] p-12 text-center shadow-xl border border-gray-100 max-w-2xl mx-auto relative overflow-hidden">
-                  {showGuestModal && (
-                    <div className="absolute inset-0 z-[100] flex items-center justify-center p-6">
-                      <div className="absolute inset-0 bg-white/80 backdrop-blur-md"></div>
-                      <motion.div 
-                        initial={{ opacity: 0, scale: 0.9 }} 
-                        animate={{ opacity: 1, scale: 1 }}
-                        className="relative z-10 bg-white p-10 rounded-[2.5rem] shadow-2xl border border-teal-100 w-full max-w-md"
-                      >
-                        <div className="w-16 h-16 bg-teal-50 text-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-inner">
-                          <MessageSquare size={32} />
-                        </div>
-                        <h3 className="text-2xl font-black text-gray-900 mb-4">练习完成！</h3>
-                        <p className="text-gray-600 mb-8 leading-relaxed font-medium">
-                          为了方便 Eva 老师为你提供后续点评及学习建议，请留下你的称呼或微信号：
-                        </p>
-                        <form onSubmit={handleGuestSubmit} className="space-y-6">
-                          <input 
-                            type="text"
-                            value={guestContact}
-                            onChange={(e) => setGuestContact(e.target.value)}
-                            placeholder="昵称 / 微信号 (选填)"
-                            className="w-full px-6 py-4 bg-gray-50 border-2 border-transparent focus:border-teal-500 focus:bg-white rounded-2xl outline-none transition-all font-medium text-center"
-                          />
-                          <button 
-                            type="submit"
-                            className="w-full py-4 bg-teal-600 text-white rounded-2xl font-black text-lg hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20"
-                          >
-                            提交并看分
-                          </button>
-                        </form>
-                      </motion.div>
-                    </div>
-                  )}
+                <div className="bg-white rounded-[3rem] p-8 md:p-12 text-center shadow-xl border border-gray-100 max-w-4xl mx-auto">
                   <div className="w-24 h-24 bg-teal-50 text-teal-600 rounded-full flex items-center justify-center mx-auto mb-8 shadow-inner"><Trophy size={48} /></div>
                   <h2 className="text-4xl font-black text-gray-900 mb-2">Practice Complete!</h2>
                   <p className="text-gray-500 text-lg mb-8">Great job! Here's how you performed in this set.</p>
@@ -1110,29 +1261,81 @@ function App() {
                     <div className="bg-gray-50 p-6 rounded-3xl"><p className="text-xs font-bold text-gray-400 uppercase mb-1">Accuracy</p><p className="text-4xl font-black text-teal-600">{Math.round((score / questions.length) * 100)}%</p></div>
                     <div className="bg-gray-50 p-6 rounded-3xl"><p className="text-xs font-bold text-gray-400 uppercase mb-1">Time Taken</p><p className="text-4xl font-black text-gray-900">{formatTime(timeTaken)}</p></div>
                   </div>
-                  <div className="space-y-4 mb-12 text-left">
-                    <h3 className="text-lg font-bold text-gray-900 px-2">Review Your Answers</h3>
-                    <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
-                      {results.map((res, idx) => {
-                        const template = questions[idx]?.template || "";
-                        const renderSentence = (words: string[]) => template.split(/(\{\d+\})/g).filter(p => p !== '').map((part, pIdx) => {
-                          const match = part.match(/^\{(\d+)\}$/);
-                          if (match) {
-                            const placeholderIndex = parseInt(match[1]);
-                            return <span key={pIdx} className="underline decoration-teal-300 decoration-2 underline-offset-4">{words[placeholderIndex] || "___"}</span>;
-                          }
-                          return <span key={pIdx}>{part}</span>;
-                        });
-                        return (
-                          <div key={idx} className={cn("p-4 rounded-2xl border-2", res.isCorrect ? "bg-green-50 border-green-100" : "bg-red-50 border-red-100")}>
-                            <div className="flex items-center justify-between mb-2"><span className="text-xs font-bold uppercase tracking-wider text-gray-400">Question {idx + 1}</span>{res.isCorrect ? <span className="text-green-600 font-bold text-sm flex items-center gap-1">Correct <Check size={14} /></span> : <span className="text-red-600 font-bold text-sm flex items-center gap-1">Incorrect <X size={14} /></span>}</div>
-                            <div className="text-gray-800 font-medium mb-1"><span className="text-gray-400 mr-2">Your answer:</span>{renderSentence(res.userAnswer)}</div>
-                            {!res.isCorrect && <div className="text-teal-700 font-bold"><span className="text-gray-400 mr-2 font-medium">Correct answer:</span>{renderSentence(res.correctAnswer)}</div>}
+                  
+                  {/* 进步对比：个性化练习后展示 */}
+                  {diagnosticAnalysis && currentSet?.id !== 'assessment-diagnostic' && errorAnalysis && (
+                    <div className="mb-10 p-6 bg-gradient-to-br from-purple-50 to-white border-2 border-purple-200 rounded-3xl">
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="w-10 h-10 bg-purple-100 text-purple-600 rounded-xl flex items-center justify-center">
+                          <Trophy size={20} />
+                        </div>
+                        <div>
+                          <h3 className="text-lg font-black text-gray-900">进步对比</h3>
+                          <p className="text-xs text-gray-400">诊断测试 vs 本次练习</p>
+                        </div>
+                      </div>
+                      
+                      <div className="grid grid-cols-3 gap-4 mb-4">
+                        <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+                          <p className="text-xs text-gray-400 mb-1">诊断正确率</p>
+                          <p className="text-2xl font-black text-gray-600">{diagnosticAnalysis.accuracyRate}%</p>
+                        </div>
+                        <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+                          <p className="text-xs text-gray-400 mb-1">本次正确率</p>
+                          <p className="text-2xl font-black text-teal-600">{errorAnalysis.accuracyRate}%</p>
+                        </div>
+                        <div className="text-center p-3 bg-white rounded-2xl border border-gray-100">
+                          <p className="text-xs text-gray-400 mb-1">提升</p>
+                          <p className={`text-2xl font-black ${errorAnalysis.accuracyRate >= diagnosticAnalysis.accuracyRate ? 'text-green-600' : 'text-red-600'}`}>
+                            {errorAnalysis.accuracyRate >= diagnosticAnalysis.accuracyRate ? '+' : ''}{errorAnalysis.accuracyRate - diagnosticAnalysis.accuracyRate}%
+                          </p>
+                        </div>
+                      </div>
+                      
+                      {/* 各类型错因改善情况 */}
+                      {(() => {
+                        const improvements = diagnosticAnalysis.patterns.map(dp => {
+                          const beforeP = dp.percentage;
+                          const afterP = errorAnalysis.patterns.find(p => p.type === dp.type)?.percentage || 0;
+                          return { type: dp.type, label: dp.type, before: beforeP, after: afterP, change: beforeP - afterP };
+                        }).filter(i => i.change > 0);
+                        return improvements.length > 0 && (
+                          <div className="flex flex-wrap gap-2">
+                            <span className="text-xs text-gray-500">改善的薄弱环节：</span>
+                            {improvements.map(i => (
+                              <span key={i.type} className="px-2 py-1 bg-green-50 text-green-700 rounded-full text-xs font-bold">
+                                {i.label} ↓{i.change}%
+                              </span>
+                            ))}
                           </div>
                         );
-                      })}
+                      })()}
                     </div>
-                  </div>
+                  )}
+                  {/* 错因分析与提升练习 */}
+                  {errorAnalysis && errorAnalysis.totalErrors > 0 && (
+                    <div className="mb-12">
+                      <ErrorFeedback
+                        analysis={errorAnalysis}
+                        isDiagnostic={currentSet?.id === 'assessment-diagnostic'}
+                        comparisonAnalysis={currentSet?.id !== 'assessment-diagnostic' ? diagnosticAnalysis : null}
+                        onStartTargetedPractice={() => {
+                          if (currentSet?.id === 'assessment-diagnostic' && errorAnalysis) {
+                            // 诊断测试完成 → 生成个性化练习套题
+                            setDiagnosticAnalysis(errorAnalysis);
+                            const personalized = generatePersonalizedSet({
+                              weakAreas: errorAnalysis.weakAreas,
+                              patterns: errorAnalysis.patterns,
+                              correctIds: correctQuestionIds,
+                            });
+                            startSet(personalized);
+                          } else {
+                            setView('targeted-practice');
+                          }
+                        }}
+                      />
+                    </div>
+                  )}
                   <div className="flex flex-col sm:flex-row gap-4 justify-center">
                     <button onClick={() => setView('home')} className="px-8 py-4 bg-teal-600 text-white rounded-2xl font-bold text-lg hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20">Back to Home</button>
                     <button onClick={() => startSet(currentSet!)} className="px-8 py-4 bg-white text-teal-600 border-2 border-teal-600 rounded-2xl font-bold text-lg hover:bg-teal-50 transition-all">Try Again</button>
@@ -1141,8 +1344,53 @@ function App() {
               )}
             </motion.div>
           )}
+          {view === 'targeted-practice' && errorAnalysis && (
+            <TargetedPractice
+              weakAreas={errorAnalysis.weakAreas}
+              originalQuestions={questions}
+              availableSets={availableSets.filter(Boolean).map(s => ({ id: s.id, name: s.name, isFree: s.isFree }))}
+              correctQuestionIds={correctQuestionIds}
+              onBack={() => setView('quiz')}
+              onComplete={() => setView('home')}
+            />
+          )}
         </AnimatePresence>
       </main>
+
+      {/* 游客联系信息弹窗 - 固定全屏覆盖 */}
+      {showGuestModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-6">
+          <div className="absolute inset-0 bg-black/30 backdrop-blur-sm"></div>
+          <motion.div 
+            initial={{ opacity: 0, scale: 0.9 }} 
+            animate={{ opacity: 1, scale: 1 }}
+            className="relative z-10 bg-white p-10 rounded-[2.5rem] shadow-2xl border border-teal-100 w-full max-w-md"
+          >
+            <div className="w-16 h-16 bg-teal-50 text-teal-600 rounded-2xl flex items-center justify-center mx-auto mb-6 shadow-inner">
+              <MessageSquare size={32} />
+            </div>
+            <h3 className="text-2xl font-black text-gray-900 mb-4">练习完成！🎉</h3>
+            <p className="text-gray-600 mb-8 leading-relaxed font-medium">
+              为了方便 Eva 老师为你提供后续点评及学习建议，请留下你的称呼或微信号：
+            </p>
+            <form onSubmit={handleGuestSubmit} className="space-y-6">
+              <input 
+                type="text"
+                value={guestContact}
+                onChange={(e) => setGuestContact(e.target.value)}
+                placeholder="昵称 / 微信号 (选填)"
+                className="w-full px-6 py-4 bg-gray-50 border-2 border-transparent focus:border-teal-500 focus:bg-white rounded-2xl outline-none transition-all font-medium text-center"
+              />
+              <button 
+                type="submit"
+                className="w-full py-4 bg-teal-600 text-white rounded-2xl font-black text-lg hover:bg-teal-700 transition-all shadow-lg shadow-teal-600/20"
+              >
+                提交并看分
+              </button>
+            </form>
+          </motion.div>
+        </div>
+      )}
     </div>
   );
 }

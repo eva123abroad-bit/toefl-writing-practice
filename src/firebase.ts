@@ -11,13 +11,31 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-// 初始化 Firebase
-const app = initializeApp(firebaseConfig);
+// 检查 Firebase 配置是否完整
+const isFirebaseConfigured = Boolean(
+  firebaseConfig.apiKey &&
+  firebaseConfig.projectId &&
+  firebaseConfig.appId
+);
 
-// 导出 auth 和 db
-export const auth = getAuth(app);
-// 💡 修正：使用标准方式获取 Firestore
-export const db = getFirestore(app);
+let app: ReturnType<typeof initializeApp> | null = null;
+export let auth: ReturnType<typeof getAuth> | null = null;
+export let db: ReturnType<typeof getFirestore> | null = null;
+export let isFirebaseReady = false;
+
+if (isFirebaseConfigured) {
+  try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+    isFirebaseReady = true;
+    console.log('[Firebase] 初始化成功');
+  } catch (error) {
+    console.warn('[Firebase] 初始化失败，将使用本地种子数据', error);
+  }
+} else {
+  console.warn('[Firebase] 配置不完整，将使用本地种子数据');
+}
 
 export const OperationType = {
   CREATE: 'create',
@@ -34,8 +52,8 @@ export function handleFirestoreError(error: unknown, operationType: string, path
   const errInfo = {
     error: errorMessage,
     authInfo: {
-      userId: auth.currentUser?.uid,
-      email: auth.currentUser?.email,
+      userId: auth?.currentUser?.uid,
+      email: auth?.currentUser?.email,
     },
     operationType,
     path

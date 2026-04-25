@@ -9,6 +9,8 @@ import {
   ResponsiveContainer,
   Cell,
 } from 'recharts';
+import { assessmentSet } from '../data/seedQuestions';
+import { practicePool } from '../data/practicePool';
 import { 
   Users, 
   CheckCircle2, 
@@ -168,7 +170,18 @@ export default function AdminDashboard({ onBack }: { onBack: () => void }) {
       try {
         // Fetch sets
         const questionsSnapshot = await getDocs(collection(db, 'questions'));
-        setSets(questionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        const firestoreSets = questionsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        
+        // 加入诊断测试（本地数据，不在 Firestore 中）
+        const diagnosticQuestions = practicePool.questions || assessmentSet.questions || [];
+        const diagnosticSet = {
+          id: 'assessment-diagnostic',
+          name: '能力诊断测试',
+          isFree: true,
+          questions: diagnosticQuestions,
+          questionCount: diagnosticQuestions.length,
+        };
+        setSets([diagnosticSet, ...firestoreSets]);
 
         // Fetch results
         const resultsSnapshot = await getDocs(query(collection(db, 'results'), orderBy('completedAt', 'desc'), limit(500)));
